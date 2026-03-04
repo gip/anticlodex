@@ -1,0 +1,31 @@
+"id": "p.google-oauth"
+"kind": "Process"
+"name": "Google OAuth Process"
+"parentId": "h.google-platform"
+"metadata":
+  "openshipKey": "google-oauth"
+  "ownership": "third_party"
+  "boundary": "external"
+  "runtime": "oauth2-provider"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:b22a826a876d32caaabd8fc82a6255d45e75f91095c449655b39e56ba73f2d77"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:c2cd9ef91301ee9d8a12dcc38e0b4a82df79803b3caf14b49f4abb5e43733afd"
+    "skillRefs": []
+  "Interfaces":
+    "documentRefs":
+      - "sha256:f200ca780fdd3eaa75575d25d65aa423a7c39d3fba592e28d8f4f41e13bac626"
+    "skillRefs": []
+  "Security":
+    "documentRefs":
+      - "sha256:2dda5749ab774da1032325ddb664fd1d168fa72b47d2712f27d55e44070475c6"
+    "skillRefs": []
+"artifacts":
+  "Summary":
+    - "a.p.google-oauth.features.summary.v1"
+  "Docs":
+    - "a.p.google-oauth.specs.docs.v1"

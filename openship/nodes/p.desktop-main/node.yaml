@@ -1,0 +1,32 @@
+"id": "p.desktop-main"
+"kind": "Process"
+"name": "Desktop Main Process"
+"parentId": "h.desktop-runtime"
+"metadata":
+  "openshipKey": "desktop-main"
+  "ownership": "first_party"
+  "boundary": "external"
+  "runtime": "node/electron-main"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:8050de399ca9f4184fa5e48287233a80d7b31876f514874cad5a0af9bfa366f4"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:600caad66a86e365fcfffafb96fba48025dd9154aeb479b889c568126d7aeb19"
+    "skillRefs": []
+  "Interfaces":
+    "documentRefs":
+      - "sha256:a50f22f32a0e96be26329516bf85862355203bdad9c99ef865a6e508bb8561f8"
+    "skillRefs": []
+  "General Skills":
+    "documentRefs": []
+    "skillRefs":
+      - "sha256:98cfae5b91d542d0bc6ee1912bee6c2e9de340e0d0adb77d9c810a6a6fbbbf03"
+      - "sha256:c8b4d75c7cf3a0798c14b76ac2af46d6dd3b6570c03b96b0db0ec2b601d7bedf"
+"artifacts":
+  "Summary":
+    - "a.p.desktop-main.features.summary.v1"
+  "Docs":
+    - "a.p.desktop-main.specs.docs.v1"

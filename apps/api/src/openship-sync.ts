@@ -11,8 +11,6 @@ const TYPED_NODE_ID_SCHEME = "typed_key_v1";
 const TYPED_NODE_ID_PATTERN = /^([hcpl])\.([a-z0-9]+(?:-[a-z0-9]+)*)$/;
 const NODE_OWNERSHIP_VALUES = new Set(["first_party", "third_party"]);
 const NODE_BOUNDARY_VALUES = new Set(["internal", "external"]);
-const FIRST_PARTY_HOST_NAME_PREFIX = "First-Party Host";
-const THIRD_PARTY_HOST_NAME_PREFIXES = ["Third-Party Service Host", "External Service Host"] as const;
 
 type YamlScalar = string | number | boolean | null;
 interface YamlObject {
@@ -624,6 +622,7 @@ function validateNodeOwnershipAndBoundary(parsed: ParsedOpenShipBundle): void {
   for (const node of parsed.nodes) {
     const ownership = typeof node.metadata.ownership === "string" ? node.metadata.ownership : null;
     const boundary = typeof node.metadata.boundary === "string" ? node.metadata.boundary : null;
+    const name = typeof node.name === "string" ? node.name.trim() : "";
 
     if (!ownership || !NODE_OWNERSHIP_VALUES.has(ownership)) {
       throw new Error(
@@ -636,24 +635,8 @@ function validateNodeOwnershipAndBoundary(parsed: ParsedOpenShipBundle): void {
         `Invalid node "${node.id}" metadata.boundary; expected one of internal|external.`,
       );
     }
-
-    if (node.kind !== "Host") continue;
-
-    if (ownership === "first_party") {
-      if (!node.name.startsWith(FIRST_PARTY_HOST_NAME_PREFIX)) {
-        throw new Error(
-          `Invalid Host name for node "${node.id}"; first_party hosts must start with "${FIRST_PARTY_HOST_NAME_PREFIX}".`,
-        );
-      }
-      continue;
-    }
-
-    const hasValidThirdPartyPrefix = THIRD_PARTY_HOST_NAME_PREFIXES.some((prefix) => node.name.startsWith(prefix));
-    if (!hasValidThirdPartyPrefix) {
-      throw new Error(
-        `Invalid Host name for node "${node.id}"; third_party hosts must start with ` +
-          `"${THIRD_PARTY_HOST_NAME_PREFIXES[0]}" or "${THIRD_PARTY_HOST_NAME_PREFIXES[1]}".`,
-      );
+    if (name.length === 0) {
+      throw new Error(`Invalid node "${node.id}" name; expected non-empty string.`);
     }
   }
 }

@@ -1,0 +1,22 @@
+"id": "l.ui"
+"kind": "Library"
+"name": "@staffx/ui Shared UI Library"
+"metadata":
+  "openshipKey": "ui"
+  "ownership": "first_party"
+  "boundary": "internal"
+  "language": "typescript-react"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:b100fb9bc23d87a924c3c2e3ba99c403dc755c15bebc7eefe7e3d8b23cf98aaa"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:2a2fb41433ad8dd2cfdac0cd7987b0ea95aae53d61aa3b67e384a15923df7f93"
+    "skillRefs": []
+"artifacts":
+  "Summary":
+    - "a.l.ui.features.summary.v1"
+  "Docs":
+    - "a.l.ui.specs.docs.v1"

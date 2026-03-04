@@ -1,0 +1,23 @@
+"id": "p.browser"
+"kind": "Process"
+"name": "Browser Execution Process"
+"parentId": "h.browser-user-agent"
+"metadata":
+  "openshipKey": "browser"
+  "ownership": "third_party"
+  "boundary": "external"
+  "runtime": "browser-engine"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:0dbcd1eb263c05c479d278f151da93bb3acee60a40d394e232d382a5e96f6b4f"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:9a1a7e1d73d8f660b3f0e833673efb4384a6c1251454e1fa67938757f855ac68"
+    "skillRefs": []
+"artifacts":
+  "Summary":
+    - "a.p.browser.features.summary.v1"
+  "Docs":
+    - "a.p.browser.specs.docs.v1"

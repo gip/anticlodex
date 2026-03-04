@@ -1,0 +1,23 @@
+"id": "h.auth0"
+"kind": "Host"
+"name": "Auth0"
+"parentId": "s.root"
+"metadata":
+  "openshipKey": "auth0"
+  "ownership": "third_party"
+  "boundary": "external"
+  "platform": "auth0-cloud"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:6fd8102c126f91274bb44b87f0361f8736f6aa5ade0e712d77b82df065f79502"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:221ed7231c9b20325127f23d598c1bb135c7083d7a588ef691c356e4dca544f2"
+    "skillRefs": []
+"artifacts":
+  "Summary":
+    - "a.h.auth0.features.summary.v1"
+  "Docs":
+    - "a.h.auth0.specs.docs.v1"

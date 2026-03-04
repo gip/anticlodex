@@ -35,6 +35,11 @@ export interface Project {
 const TEMPLATES = [
   { id: "blank", label: "Blank", description: "Empty project, start from scratch" },
   {
+    id: "staffx-openship-bundle-import",
+    label: "StaffX OpenShip runtime import",
+    description: "Imports the canonical OpenShip bundle from ./openship into the project",
+  },
+  {
     id: "webserver-postgres-auth0-google-vercel",
     label: "Webserver + Postgres + Auth0 Google login + Vercel",
     description: "Seeded stack with topology, architecture concern, and spec docs",

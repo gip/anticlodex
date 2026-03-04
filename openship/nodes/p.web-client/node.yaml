@@ -1,0 +1,32 @@
+"id": "p.web-client"
+"kind": "Process"
+"name": "Web Client Process"
+"parentId": "h.web-runtime"
+"metadata":
+  "openshipKey": "web-client"
+  "ownership": "first_party"
+  "boundary": "external"
+  "runtime": "react/browser"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:4e186755ac553bc9aadac5b5028af3e6361e5fc23d5ac483f77567d383419bd0"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:aefb9f856eff37e2e215aa4da5387524ea79e8a53707aeb84f10efbc8e3b406c"
+    "skillRefs": []
+  "Interfaces":
+    "documentRefs":
+      - "sha256:a50f22f32a0e96be26329516bf85862355203bdad9c99ef865a6e508bb8561f8"
+    "skillRefs": []
+  "General Skills":
+    "documentRefs": []
+    "skillRefs":
+      - "sha256:98cfae5b91d542d0bc6ee1912bee6c2e9de340e0d0adb77d9c810a6a6fbbbf03"
+      - "sha256:c8b4d75c7cf3a0798c14b76ac2af46d6dd3b6570c03b96b0db0ec2b601d7bedf"
+"artifacts":
+  "Summary":
+    - "a.p.web-client.features.summary.v1"
+  "Docs":
+    - "a.p.web-client.specs.docs.v1"

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
@@ -14,7 +15,10 @@ import {
   getAgentRunById,
   updateAgentRunResult,
 } from "../agent-queue.js";
-import { applyOpenShipBundleToThreadSystem } from "../openship-sync.js";
+import {
+  applyOpenShipBundleToThreadSystem,
+  applyOpenShipBundleToThreadSystemWithClient,
+} from "../openship-sync.js";
 import type { AgentRunPlanChange } from "@staffx/agent-runtime";
 import {
   publishEvent,
@@ -69,6 +73,17 @@ function buildTypedNodeId(kind: V1OpenShipNodeKind, key: string): string {
 function computeTemplateDocumentHash(document: Pick<TemplateDocument, "kind" | "title" | "language" | "text">): string {
   const payload = [document.kind, document.title, document.language, document.text].join("\n");
   return `sha256:${createHash("sha256").update(payload, "utf8").digest("hex")}`;
+}
+
+function resolveTemplateBundlePath(bundlePath: string): string {
+  const override = process.env.STAFFX_TEMPLATE_BUNDLE_PATH?.trim();
+  if (override) return resolve(override);
+
+  const direct = resolve(process.cwd(), bundlePath);
+  const workspaceRoot = resolve(process.cwd(), "..", "..", bundlePath);
+  if (existsSync(direct)) return direct;
+  if (existsSync(workspaceRoot)) return workspaceRoot;
+  return direct;
 }
 
 async function seedSystemConcernsV1(
@@ -1447,6 +1462,21 @@ export async function v1Routes(app: FastifyInstance) {
         return writeProblem(reply, 400, "Invalid template", "template must match a known project template.");
       }
       const selectedTemplate = getTemplateById(selectedTemplateId);
+      let templateBundleFiles: V1OpenShipBundleFile[] | null = null;
+      if (selectedTemplate?.bundleImportPath) {
+        const bundlePath = resolveTemplateBundlePath(selectedTemplate.bundleImportPath);
+        try {
+          templateBundleFiles = await collectOpenShipBundleFiles(bundlePath);
+        } catch (error) {
+          req.log.error({ error, bundlePath, templateId: selectedTemplate.id }, "Failed to load template bundle");
+          return writeProblem(
+            reply,
+            500,
+            "Template bundle unavailable",
+            "The selected template could not load its OpenShip bundle.",
+          );
+        }
+      }
 
       const existing = await query<{ id: string }>(
         "SELECT 1 FROM projects WHERE owner_id = $1 AND name = $2",
@@ -1513,6 +1543,12 @@ export async function v1Routes(app: FastifyInstance) {
           "SELECT create_thread($1, $2, $3, $4, $5, $6)",
           [threadId, projectId, user.id, systemId, "Project Creation", description],
         );
+        if (templateBundleFiles) {
+          await applyOpenShipBundleToThreadSystemWithClient(client, {
+            threadId,
+            bundleFiles: templateBundleFiles,
+          });
+        }
 
         await client.query("COMMIT");
         inTransaction = false;

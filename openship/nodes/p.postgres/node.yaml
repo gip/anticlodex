@@ -1,0 +1,27 @@
+"id": "p.postgres"
+"kind": "Process"
+"name": "PostgreSQL Process"
+"parentId": "h.data-runtime"
+"metadata":
+  "openshipKey": "postgres"
+  "ownership": "first_party"
+  "boundary": "internal"
+  "runtime": "postgresql"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:c831fe4b78885bd8f96db48d7046bfc5bb93639f0a98ed4c735a88a77a883b9d"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:403555356632216e5c3fc7e9db537387a6a1f974085cd6582456a8fcc1c28109"
+    "skillRefs": []
+  "Data Model":
+    "documentRefs":
+      - "sha256:f46ed9f37a251c080bb4569dd6a562939465edc02ac547e0bda4b9053eeb1f6e"
+    "skillRefs": []
+"artifacts":
+  "Summary":
+    - "a.p.postgres.features.summary.v1"
+  "Docs":
+    - "a.p.postgres.specs.docs.v1"

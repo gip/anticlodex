@@ -1,0 +1,23 @@
+"id": "h.api-runtime"
+"kind": "Host"
+"name": "API Runtime"
+"parentId": "s.root"
+"metadata":
+  "openshipKey": "api-runtime"
+  "ownership": "first_party"
+  "boundary": "internal"
+  "platform": "node-fastify"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:4894604d0f42ac3b0545fcc641012eac7c1e822eef959a2aa39fe7221febf390"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:8516898e6ffa764a5d755ab8078c9574d5831babd0b1ef61d29edd7195fabc7d"
+    "skillRefs": []
+"artifacts":
+  "Summary":
+    - "a.h.api-runtime.features.summary.v1"
+  "Docs":
+    - "a.h.api-runtime.specs.docs.v1"

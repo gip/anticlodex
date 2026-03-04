@@ -1,0 +1,54 @@
+"id": "p.api"
+"kind": "Process"
+"name": "API Service Process"
+"parentId": "h.api-runtime"
+"metadata":
+  "openshipKey": "api"
+  "ownership": "first_party"
+  "boundary": "internal"
+  "runtime": "node-fastify-process"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:527d89b9c85b622ee02d8c09485c9b6fa1eeee3772e98613620cda85350f9daa"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:138de69d3958c6831b437775d3282a11f30ec1f9923c93db18ab7a89ca5a9c09"
+    "skillRefs": []
+  "Interfaces":
+    "documentRefs":
+      - "sha256:a50f22f32a0e96be26329516bf85862355203bdad9c99ef865a6e508bb8561f8"
+      - "sha256:f200ca780fdd3eaa75575d25d65aa423a7c39d3fba592e28d8f4f41e13bac626"
+    "skillRefs": []
+  "Data Model":
+    "documentRefs":
+      - "sha256:f46ed9f37a251c080bb4569dd6a562939465edc02ac547e0bda4b9053eeb1f6e"
+    "skillRefs": []
+  "Security":
+    "documentRefs":
+      - "sha256:2dda5749ab774da1032325ddb664fd1d168fa72b47d2712f27d55e44070475c6"
+    "skillRefs": []
+  "Connectivity":
+    "documentRefs":
+      - "sha256:936244f032de7047064eb727bd1c4c990b941e8535d09becc5251e60d1eeb140"
+      - "sha256:ea88d25c8965e9ba2c77b4ebbc606c3628e285036754c10071e00c0cf8076726"
+    "skillRefs": []
+  "Deployment":
+    "documentRefs":
+      - "sha256:440d3a7e340176accad589ee59162fe8f0c487fe0ac5d847fc691d4c2c2204c0"
+    "skillRefs": []
+  "General Skills":
+    "documentRefs": []
+    "skillRefs":
+      - "sha256:98cfae5b91d542d0bc6ee1912bee6c2e9de340e0d0adb77d9c810a6a6fbbbf03"
+      - "sha256:c8b4d75c7cf3a0798c14b76ac2af46d6dd3b6570c03b96b0db0ec2b601d7bedf"
+  "Functional Testing":
+    "documentRefs":
+      - "sha256:f2c45d8facb912150a04d6437bd7a3806b07b75d3fb9e2417ee1a77a2cbe64c8"
+    "skillRefs": []
+"artifacts":
+  "Summary":
+    - "a.p.api.features.summary.v1"
+  "Docs":
+    - "a.p.api.specs.docs.v1"

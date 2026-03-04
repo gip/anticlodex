@@ -1,0 +1,133 @@
+"edges":
+  -
+    "id": "e.browser.web-client"
+    "type": "Runtime"
+    "fromNodeId": "p.browser"
+    "toNodeId": "p.web-client"
+    "metadata":
+      "protocol": "https"
+      "layer7": "spa-delivery"
+  -
+    "id": "e.web-client.api"
+    "type": "Runtime"
+    "fromNodeId": "p.web-client"
+    "toNodeId": "p.api"
+    "metadata":
+      "protocol": "https"
+      "layer7": "rest-json"
+  -
+    "id": "e.desktop-renderer.api"
+    "type": "Runtime"
+    "fromNodeId": "p.desktop-renderer"
+    "toNodeId": "p.api"
+    "metadata":
+      "protocol": "https"
+      "layer7": "rest-json"
+  -
+    "id": "e.desktop-main.api"
+    "type": "Runtime"
+    "fromNodeId": "p.desktop-main"
+    "toNodeId": "p.api"
+    "metadata":
+      "protocol": "https"
+      "layer7": "rest-json"
+  -
+    "id": "e.desktop-main.renderer"
+    "type": "Runtime"
+    "fromNodeId": "p.desktop-main"
+    "toNodeId": "p.desktop-renderer"
+    "metadata":
+      "protocol": "electron-ipc"
+      "layer7": "ipc-request-response"
+  -
+    "id": "e.desktop-renderer.main"
+    "type": "Runtime"
+    "fromNodeId": "p.desktop-renderer"
+    "toNodeId": "p.desktop-main"
+    "metadata":
+      "protocol": "electron-ipc"
+      "layer7": "ipc-command"
+  -
+    "id": "e.web-client.auth0"
+    "type": "Runtime"
+    "fromNodeId": "p.web-client"
+    "toNodeId": "p.auth0"
+    "metadata":
+      "protocol": "https"
+      "layer7": "oidc-oauth2-pkce"
+  -
+    "id": "e.desktop-main.auth0"
+    "type": "Runtime"
+    "fromNodeId": "p.desktop-main"
+    "toNodeId": "p.auth0"
+    "metadata":
+      "protocol": "https"
+      "layer7": "oidc-oauth2-pkce"
+  -
+    "id": "e.api.auth0"
+    "type": "Runtime"
+    "fromNodeId": "p.api"
+    "toNodeId": "p.auth0"
+    "metadata":
+      "protocol": "https"
+      "layer7": "oidc-oauth2"
+  -
+    "id": "e.auth0.google-oauth"
+    "type": "Runtime"
+    "fromNodeId": "p.auth0"
+    "toNodeId": "p.google-oauth"
+    "metadata":
+      "protocol": "https"
+      "layer7": "oidc-oauth2"
+  -
+    "id": "e.api.google-docs"
+    "type": "Runtime"
+    "fromNodeId": "p.api"
+    "toNodeId": "p.google-docs"
+    "metadata":
+      "protocol": "https"
+      "layer7": "google-docs-rest"
+  -
+    "id": "e.api.notion-api"
+    "type": "Runtime"
+    "fromNodeId": "p.api"
+    "toNodeId": "p.notion-api"
+    "metadata":
+      "protocol": "https"
+      "layer7": "notion-rest"
+  -
+    "id": "e.api.postgres"
+    "type": "Dataflow"
+    "fromNodeId": "p.api"
+    "toNodeId": "p.postgres"
+    "metadata":
+      "protocol": "pgwire"
+      "layer7": "postgresql-sql"
+  -
+    "id": "e.web-client.ui-lib"
+    "type": "Dependency"
+    "fromNodeId": "p.web-client"
+    "toNodeId": "l.ui"
+    "metadata":
+      "description": "Shared UI components and shared client types"
+  -
+    "id": "e.desktop-renderer.ui-lib"
+    "type": "Dependency"
+    "fromNodeId": "p.desktop-renderer"
+    "toNodeId": "l.ui"
+    "metadata":
+      "description": "Shared UI components and shared client types"
+  -
+    "id": "e.api.agent-runtime-lib"
+    "type": "Dependency"
+    "fromNodeId": "p.api"
+    "toNodeId": "l.agent-runtime"
+    "metadata":
+      "description": "Assistant runtime execution and OpenShip diff helpers"
+  -
+    "id": "e.desktop-main.agent-runtime-lib"
+    "type": "Dependency"
+    "fromNodeId": "p.desktop-main"
+    "toNodeId": "l.agent-runtime"
+    "metadata":
+      "description": "Local assistant execution and OpenShip bundle diffing"

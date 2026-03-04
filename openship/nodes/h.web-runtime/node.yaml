@@ -1,0 +1,23 @@
+"id": "h.web-runtime"
+"kind": "Host"
+"name": "Web Runtime"
+"parentId": "s.root"
+"metadata":
+  "openshipKey": "web-runtime"
+  "ownership": "first_party"
+  "boundary": "external"
+  "platform": "browser-web"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:d5f07057544b6136860104186ec0bbbfcb3960c7cd76244bd18d4773b44676ca"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:c10807814ae29e719bbc722830c38d2b6270d6a7d2b4b63d93ebaad1dc14549e"
+    "skillRefs": []
+"artifacts":
+  "Summary":
+    - "a.h.web-runtime.features.summary.v1"
+  "Docs":
+    - "a.h.web-runtime.specs.docs.v1"

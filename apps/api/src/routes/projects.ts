@@ -1,8 +1,15 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import type { PoolClient } from "pg";
 import { verifyAuth, verifyOptionalAuth, type AuthUser } from "../auth.js";
 import pool, { query } from "../db.js";
+import {
+  applyOpenShipBundleToThreadSystemWithClient,
+  collectOpenShipBundleFiles,
+  type OpenShipBundleFile,
+} from "../openship-sync.js";
 import {
   BLANK_TEMPLATE_ID,
   DEFAULT_CONCERNS,
@@ -71,6 +78,17 @@ function buildTypedNodeId(kind: OpenShipNodeKind, key: string): string {
 function computeDocumentHash(document: Pick<TemplateDocument, "kind" | "title" | "language" | "text">) {
   const payload = [document.kind, document.title, document.language, document.text].join("\n");
   return `sha256:${createHash("sha256").update(payload, "utf8").digest("hex")}`;
+}
+
+function resolveTemplateBundlePath(bundlePath: string): string {
+  const override = process.env.STAFFX_TEMPLATE_BUNDLE_PATH?.trim();
+  if (override) return resolve(override);
+
+  const direct = resolve(process.cwd(), bundlePath);
+  const workspaceRoot = resolve(process.cwd(), "..", "..", bundlePath);
+  if (existsSync(direct)) return direct;
+  if (existsSync(workspaceRoot)) return workspaceRoot;
+  return direct;
 }
 
 async function seedSystemConcerns(
@@ -494,6 +512,16 @@ export async function projectRoutes(app: FastifyInstance) {
         return reply.code(400).send({ error: "Invalid template" });
       }
       const selectedTemplate = getTemplateById(selectedTemplateId);
+      let templateBundleFiles: OpenShipBundleFile[] | null = null;
+      if (selectedTemplate?.bundleImportPath) {
+        const bundlePath = resolveTemplateBundlePath(selectedTemplate.bundleImportPath);
+        try {
+          templateBundleFiles = await collectOpenShipBundleFiles(bundlePath);
+        } catch (error) {
+          req.log.error({ error, bundlePath, templateId: selectedTemplate.id }, "Failed to load template bundle");
+          return reply.code(500).send({ error: "Template bundle unavailable" });
+        }
+      }
 
       const id = randomUUID();
       const client = await pool.connect();
@@ -549,6 +577,12 @@ export async function projectRoutes(app: FastifyInstance) {
           "SELECT create_thread($1, $2, $3, $4, $5, $6)",
           [threadId, id, authUser.id, systemId, "Project Creation", null],
         );
+        if (templateBundleFiles) {
+          await applyOpenShipBundleToThreadSystemWithClient(client, {
+            threadId,
+            bundleFiles: templateBundleFiles,
+          });
+        }
 
         const threadResult = await client.query<ThreadRow>(
           `SELECT t.id, t.title, t.description, t.project_thread_id, t.status, t.updated_at

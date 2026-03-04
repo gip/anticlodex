@@ -1,0 +1,23 @@
+"id": "h.google-platform"
+"kind": "Host"
+"name": "Google Platform"
+"parentId": "s.root"
+"metadata":
+  "openshipKey": "google-platform"
+  "ownership": "third_party"
+  "boundary": "external"
+  "platform": "google-cloud-apis"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:66866756b3b8420ed507603cbf23fc7bb70968f54f1fde97068a784ed3e6fe23"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:4064f1ee8fc74cc0491c440173023fec06f88fa6a82795c0bb7676a11425ae11"
+    "skillRefs": []
+"artifacts":
+  "Summary":
+    - "a.h.google-platform.features.summary.v1"
+  "Docs":
+    - "a.h.google-platform.specs.docs.v1"

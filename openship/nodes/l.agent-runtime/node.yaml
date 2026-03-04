@@ -1,0 +1,22 @@
+"id": "l.agent-runtime"
+"kind": "Library"
+"name": "@staffx/agent-runtime Execution Library"
+"metadata":
+  "openshipKey": "agent-runtime"
+  "ownership": "first_party"
+  "boundary": "internal"
+  "language": "typescript-node"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:fa980671a12a1842622b06c262775885bc94cab6e8976c4b5244e95ae44de16c"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:88aa9ebbd04287e59f6e70269259a0888cea519336360b229103a7f73361db51"
+    "skillRefs": []
+"artifacts":
+  "Summary":
+    - "a.l.agent-runtime.features.summary.v1"
+  "Docs":
+    - "a.l.agent-runtime.specs.docs.v1"

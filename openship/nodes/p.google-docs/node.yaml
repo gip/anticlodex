@@ -1,0 +1,31 @@
+"id": "p.google-docs"
+"kind": "Process"
+"name": "Google Docs API Process"
+"parentId": "h.google-platform"
+"metadata":
+  "openshipKey": "google-docs"
+  "ownership": "third_party"
+  "boundary": "external"
+  "runtime": "google-docs-api"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:75c1b1634d5372c513e1a95b5ee2150ca439d0aa3603899d443086782db7664b"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:6dae240ffa7e084b29dfe3cdda653e4e514fcd95b66052aebd340445d27f6bcc"
+    "skillRefs": []
+  "Interfaces":
+    "documentRefs":
+      - "sha256:f200ca780fdd3eaa75575d25d65aa423a7c39d3fba592e28d8f4f41e13bac626"
+    "skillRefs": []
+  "Security":
+    "documentRefs":
+      - "sha256:2dda5749ab774da1032325ddb664fd1d168fa72b47d2712f27d55e44070475c6"
+    "skillRefs": []
+"artifacts":
+  "Summary":
+    - "a.p.google-docs.features.summary.v1"
+  "Docs":
+    - "a.p.google-docs.specs.docs.v1"

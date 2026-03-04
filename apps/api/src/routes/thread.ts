@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
-import { AgentRunPlanChange } from "@staffx/agent-runtime";
+import { AgentRunPlanChange } from "@acx/agent-runtime";
 import pool, { query } from "../db.js";
 import {
   applyOpenShipBundleToThreadSystem,
@@ -40,10 +40,10 @@ function parsePositiveMs(value: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-const AGENT_RUN_TIMEOUT_MS = parsePositiveMs(process.env.STAFFX_AGENT_RUN_TIMEOUT_MS ?? "120000", 120000);
-const AGENT_RUN_POLL_MS = parsePositiveMs(process.env.STAFFX_AGENT_RUN_POLL_MS ?? "700", 700);
-const AGENT_RUN_SLOT_WAIT_MS = parsePositiveMs(process.env.STAFFX_AGENT_RUN_SLOT_WAIT_MS ?? "120000", 120000);
-const AGENT_RUN_ENQUEUE_POLL_MS = parsePositiveMs(process.env.STAFFX_AGENT_RUN_ENQUEUE_POLL_MS ?? "500", 500);
+const AGENT_RUN_TIMEOUT_MS = parsePositiveMs(process.env.ACX_AGENT_RUN_TIMEOUT_MS ?? "120000", 120000);
+const AGENT_RUN_POLL_MS = parsePositiveMs(process.env.ACX_AGENT_RUN_POLL_MS ?? "700", 700);
+const AGENT_RUN_SLOT_WAIT_MS = parsePositiveMs(process.env.ACX_AGENT_RUN_SLOT_WAIT_MS ?? "120000", 120000);
+const AGENT_RUN_ENQUEUE_POLL_MS = parsePositiveMs(process.env.ACX_AGENT_RUN_ENQUEUE_POLL_MS ?? "500", 500);
 const DEFAULT_SYSTEM_PROMPT =
   "You are a staff software engineer with top design and implementation skills. " +
   "Start by reading AGENTS.md. " + 
@@ -487,7 +487,7 @@ async function collectOpenShipBundleDescriptorFiles(bundleDir: string): Promise<
 }
 
 async function buildOpenShipBundleDescriptor(threadId: string, contextSystemId: string): Promise<OpenShipBundleDescriptor> {
-  const workspace = await mkdtemp(join(tmpdir(), "staffx-openship-bundle-"));
+  const workspace = await mkdtemp(join(tmpdir(), "acx-openship-bundle-"));
   try {
     const bundleDir = await generateOpenShipFileBundle(threadId, workspace);
     const files = await collectOpenShipBundleDescriptorFiles(bundleDir);

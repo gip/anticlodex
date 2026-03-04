@@ -1,6 +1,6 @@
 # Event delivery (poll + SSE)
 
-StaffX exposes every run/session change through two channels:
+AntiClodeX exposes every run/session change through two channels:
 
 - `GET /v1/events` for cursor-based polling
 - `GET /v1/events/stream` for streaming (SSE)
@@ -10,7 +10,7 @@ Both channels emit the same event stream in strict order.
 ## Event model
 
 ```ts
-interface StaffXEvent {
+interface ACXEvent {
   id: string;                // cursor-safe event id
   type: "chat.session.finished" | "assistant.run.started" | "assistant.run.progress" | "assistant.run.waiting_input" | "assistant.run.completed" | "assistant.run.failed" | "assistant.run.cancelled" | "thread.matrix.changed";
   aggregateType: string;

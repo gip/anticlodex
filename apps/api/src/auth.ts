@@ -65,8 +65,8 @@ function extractOrgId(payload: Auth0Payload): string | null {
     payload.orgId,
     payload.org_id,
     payload.organization,
-    (payload as { [key: string]: unknown })["https://staffx.io/org_id"],
-    (payload as { [key: string]: unknown })["https://staffx.io/organization"],
+    (payload as { [key: string]: unknown })["https://anticlodex.com/org_id"],
+    (payload as { [key: string]: unknown })["https://anticlodex.com/organization"],
   ];
 
   const first = candidates.find((value) => typeof value === "string");

@@ -1,8 +1,8 @@
-# StaffX Public API (v1) - Overview
+# AntiClodeX Public API (v1) - Overview
 
 ## Status and operating mode
 
-StaffX ships a v1 public API only in this phase.
+AntiClodeX ships a v1 public API only in this phase.
 
 - There are **no backward-compatibility guarantees** with legacy routes.
 - The entire initial database schema is created from a single migration:
@@ -163,8 +163,8 @@ curl -N -H "Authorization: Bearer $TOKEN" \
 ## Migration execution
 
 - Run migration:
-  - `pnpm --filter @staffx/api migrate`
+  - `pnpm --filter @acx/api migrate`
 - Check migration status:
-  - `pnpm --filter @staffx/api migrate:status`
+  - `pnpm --filter @acx/api migrate:status`
 - Roll back last migration (dev-only fallback):
-  - `pnpm --filter @staffx/api migrate:down:last`
+  - `pnpm --filter @acx/api migrate:down:last`

@@ -18,7 +18,7 @@ Containment and topology context:
 - Outbound edges: 3. Inbound edges: 1.
 - Runtime flow to API Service Process using transport https and application semantics rest-json.
 - Runtime flow to Desktop Main Process using transport electron-ipc and application semantics ipc-command.
-- Dependency flow to @staffx/ui Shared UI Library using transport unspecified protocol and application semantics unspecified application protocol.
+- Dependency flow to @acx/ui Shared UI Library using transport unspecified protocol and application semantics unspecified application protocol.
 - Runtime flow from Desktop Main Process using transport electron-ipc and application semantics ipc-request-response.
 
 Runtime behavior commitments:

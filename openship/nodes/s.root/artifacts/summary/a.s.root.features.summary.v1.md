@@ -6,9 +6,9 @@ type: Summary
 language: en
 ---
 
-This summary captures the current operational role of StaffX Active Runtime (Root) for concern Features. It is intended for rebuild teams to quickly understand what must be preserved before validating detailed specifications.
+This summary captures the current operational role of AntiClodeX Active Runtime (Root) for concern Features. It is intended for rebuild teams to quickly understand what must be preserved before validating detailed specifications.
 
-Current scope: StaffX Active Runtime participates in 0 outbound and 0 inbound graph connections. The node runs with ownership=first_party and boundary=internal. These constraints define who can modify this node and which trust boundaries are crossed by its traffic.
+Current scope: AntiClodeX Active Runtime participates in 0 outbound and 0 inbound graph connections. The node runs with ownership=first_party and boundary=internal. These constraints define who can modify this node and which trust boundaries are crossed by its traffic.
 
 Rebuild-critical summary points:
 - Preserve parent/child containment and node identifier semantics exactly.

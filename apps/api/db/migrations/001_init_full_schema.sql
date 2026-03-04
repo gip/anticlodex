@@ -1,4 +1,4 @@
--- StaffX full schema init (dev-only, destructive)
+-- AntiClodeX full schema init (dev-only, destructive)
 -- Order: users → openship core → projects → threads
 
 create extension if not exists pgcrypto;
@@ -401,9 +401,9 @@ begin
     select 1
     from pg_type t
     join pg_namespace n on n.oid = t.typnamespace
-    where t.typname = 'staffx_event_type' and n.nspname = current_schema()
+    where t.typname = 'acx_event_type' and n.nspname = current_schema()
   ) then
-    create type staffx_event_type as enum (
+    create type acx_event_type as enum (
       'chat.session.finished',
       'assistant.run.started',
       'assistant.run.progress',
@@ -528,9 +528,9 @@ create index idx_agent_runs_status_created on agent_runs (status, created_at);
 create unique index uq_agent_runs_thread_active on agent_runs (thread_id)
   where status = 'running';
 
-create table if not exists staffx_events (
+create table if not exists acx_events (
   id            uuid primary key default gen_random_uuid(),
-  type          staffx_event_type not null,
+  type          acx_event_type not null,
   aggregate_type text not null,
   aggregate_id   text not null,
   org_id        text,
@@ -539,13 +539,13 @@ create table if not exists staffx_events (
   version       int not null default 1,
   occurred_at   timestamptz not null default now(),
   created_at    timestamptz not null default now(),
-  constraint staffx_events_version_check check (version > 0)
+  constraint acx_events_version_check check (version > 0)
 );
 
-create index idx_staffx_events_org_aggregate on staffx_events (org_id, aggregate_type, aggregate_id);
-create index idx_staffx_events_org_occurred on staffx_events (org_id, occurred_at, id);
-create index idx_staffx_events_aggregate_occurred on staffx_events (aggregate_type, aggregate_id, occurred_at, id);
-create index idx_staffx_events_occurred on staffx_events (occurred_at, id);
+create index idx_acx_events_org_aggregate on acx_events (org_id, aggregate_type, aggregate_id);
+create index idx_acx_events_org_occurred on acx_events (org_id, occurred_at, id);
+create index idx_acx_events_aggregate_occurred on acx_events (aggregate_type, aggregate_id, occurred_at, id);
+create index idx_acx_events_occurred on acx_events (occurred_at, id);
 
 -- ============================================================
 -- FUNCTIONS

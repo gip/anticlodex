@@ -1,8 +1,8 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { Auth0Provider } from "@auth0/auth0-react";
-import { ThemeProvider } from "@staffx/ui";
-import "@staffx/ui/styles.css";
+import { ThemeProvider } from "@acx/ui";
+import "@acx/ui/styles.css";
 import { App } from "./app";
 
 const domain = import.meta.env.VITE_AUTH0_DOMAIN ?? "";

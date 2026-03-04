@@ -1,7 +1,7 @@
 import pg from "pg";
 
 const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL ?? "postgresql://localhost:5432/staffx",
+  connectionString: process.env.DATABASE_URL ?? "postgresql://localhost:5432/acx",
 });
 
 export async function query<T extends pg.QueryResultRow = pg.QueryResultRow>(

@@ -10,8 +10,8 @@ import { startAgentRunner } from "./agent-runner.js";
 
 const port = Number(process.env.PORT ?? 3001);
 const app = Fastify({ logger: true });
-const isClaudeAgentEnabled = process.env.STAFFX_ENABLE_CLAUDE_AGENT === "1";
-const apiPollMsRaw = Number(process.env.STAFFX_AGENT_RUNNER_POLL_MS ?? "1000");
+const isClaudeAgentEnabled = process.env.ACX_ENABLE_CLAUDE_AGENT === "1";
+const apiPollMsRaw = Number(process.env.ACX_AGENT_RUNNER_POLL_MS ?? "1000");
 const apiPollMs = Number.isFinite(apiPollMsRaw) && apiPollMsRaw > 0 ? apiPollMsRaw : 1000;
 
 await app.register(cors, { origin: true, methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE"] });
@@ -27,7 +27,7 @@ await app.register(async (subApp) => {
 const stopAgentRunner = isClaudeAgentEnabled
   ? startAgentRunner({
       pollIntervalMs: apiPollMs,
-      runnerId: process.env.STAFFX_AGENT_RUNNER_ID,
+      runnerId: process.env.ACX_AGENT_RUNNER_ID,
     })
   : () => {};
 

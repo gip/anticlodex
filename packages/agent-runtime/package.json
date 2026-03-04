@@ -1,5 +1,5 @@
 {
-  "name": "@staffx/agent-runtime",
+  "name": "@acx/agent-runtime",
   "version": "0.1.0",
   "private": true,
   "type": "module",

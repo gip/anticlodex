@@ -6,7 +6,7 @@ type: Docs
 language: en
 ---
 
-This docs artifact provides a detailed specification checkpoint for @staffx/agent-runtime Execution Library (Library) under concern General Specs. Use it together with matrix-linked documents to rebuild equivalent behavior without source-level assumptions.
+This docs artifact provides a detailed specification checkpoint for @acx/agent-runtime Execution Library (Library) under concern General Specs. Use it together with matrix-linked documents to rebuild equivalent behavior without source-level assumptions.
 
 Technical scope:
 - Node ID: l.agent-runtime.

@@ -19,13 +19,13 @@ import {
   applyOpenShipBundleToThreadSystem,
   applyOpenShipBundleToThreadSystemWithClient,
 } from "../openship-sync.js";
-import type { AgentRunPlanChange } from "@staffx/agent-runtime";
+import type { AgentRunPlanChange } from "@acx/agent-runtime";
 import {
   publishEvent,
   queryEvents,
   encodeCursor,
   parseCursor,
-  type StaffXEvent,
+  type ACXEvent,
 } from "../events.js";
 import {
   BLANK_TEMPLATE_ID,
@@ -76,7 +76,7 @@ function computeTemplateDocumentHash(document: Pick<TemplateDocument, "kind" | "
 }
 
 function resolveTemplateBundlePath(bundlePath: string): string {
-  const override = process.env.STAFFX_TEMPLATE_BUNDLE_PATH?.trim();
+  const override = process.env.ACX_TEMPLATE_BUNDLE_PATH?.trim();
   if (override) return resolve(override);
 
   const direct = resolve(process.cwd(), bundlePath);
@@ -2758,7 +2758,7 @@ export async function v1Routes(app: FastifyInstance) {
         return writeProblem(reply, 500, "System missing", "Thread has no current system");
       }
 
-      const workspace = await mkdtemp(join(tmpdir(), "staffx-openship-bundle-"));
+      const workspace = await mkdtemp(join(tmpdir(), "acx-openship-bundle-"));
       try {
         const bundleDir = await generateOpenShipFileBundle(resolvedThreadId, workspace);
         const files = await collectOpenShipBundleFiles(bundleDir);

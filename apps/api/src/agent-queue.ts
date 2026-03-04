@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import pool, { query } from "./db.js";
-import type { AgentRunPlanChange, AgentRunResult } from "@staffx/agent-runtime";
+import type { AgentRunPlanChange, AgentRunResult } from "@acx/agent-runtime";
 
 export type AgentRunMode = "direct" | "plan";
 export type AgentRunStatus = "queued" | "running" | "success" | "failed" | "cancelled";

@@ -6,7 +6,7 @@ type: Docs
 language: en
 ---
 
-This docs artifact provides a detailed specification checkpoint for StaffX Active Runtime (Root) under concern General Specs. Use it together with matrix-linked documents to rebuild equivalent behavior without source-level assumptions.
+This docs artifact provides a detailed specification checkpoint for AntiClodeX Active Runtime (Root) under concern General Specs. Use it together with matrix-linked documents to rebuild equivalent behavior without source-level assumptions.
 
 Technical scope:
 - Node ID: s.root.

@@ -1,15 +1,15 @@
 {
-  "name": "staffx",
+  "name": "acx",
   "private": true,
   "scripts": {
-    "dev:web": "pnpm --filter @staffx/web dev",
-    "dev:api": "pnpm --filter @staffx/api dev",
-    "dev:desktop": "pnpm --filter @staffx/desktop dev",
-    "dev:desktop:with-api": "STAFFX_ENABLE_CLAUDE_AGENT=1 pnpm --parallel --filter @staffx/api --filter @staffx/desktop run dev",
-    "build:web": "pnpm --filter @staffx/web build",
-    "build:api": "pnpm --filter @staffx/api build",
-    "build:desktop": "pnpm --filter @staffx/desktop build",
-    "migrate": "pnpm --filter @staffx/api migrate"
+    "dev:web": "pnpm --filter @acx/web dev",
+    "dev:api": "pnpm --filter @acx/api dev",
+    "dev:desktop": "pnpm --filter @acx/desktop dev",
+    "dev:desktop:with-api": "ACX_ENABLE_CLAUDE_AGENT=1 pnpm --parallel --filter @acx/api --filter @acx/desktop run dev",
+    "build:web": "pnpm --filter @acx/web build",
+    "build:api": "pnpm --filter @acx/api build",
+    "build:desktop": "pnpm --filter @acx/desktop build",
+    "migrate": "pnpm --filter @acx/api migrate"
   },
   "devDependencies": {
     "typescript": "^5.7.3",

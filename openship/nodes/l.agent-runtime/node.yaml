@@ -1,6 +1,6 @@
 "id": "l.agent-runtime"
 "kind": "Library"
-"name": "@staffx/agent-runtime Execution Library"
+"name": "@acx/agent-runtime Execution Library"
 "metadata":
   "openshipKey": "agent-runtime"
   "ownership": "first_party"

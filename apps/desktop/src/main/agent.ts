@@ -7,7 +7,7 @@ import {
   runAgent,
   snapshotOpenShipBundle,
   type AgentRuntimeMessage,
-} from "@staffx/agent-runtime";
+} from "@acx/agent-runtime";
 import { getAccessToken } from "./auth.js";
 
 function normalizeApiUrl(raw: string): string {
@@ -17,7 +17,7 @@ function normalizeApiUrl(raw: string): string {
 }
 
 const API_URL = normalizeApiUrl(import.meta.env.VITE_API_URL ?? "http://localhost:3001");
-const DEFAULT_RUNNER_ID = process.env.STAFFX_AGENT_RUNNER_ID ?? "desktop-runner";
+const DEFAULT_RUNNER_ID = process.env.ACX_AGENT_RUNNER_ID ?? "desktop-runner";
 const AGENTS_BOOTSTRAP_FILE_NAME = "AGENTS.md";
 const OPENSHIP_SPEC_WORKSPACE_FILE_PATH = "skills/openship-specs-v1/SKILL.md";
 
@@ -113,9 +113,9 @@ function sanitizeComponent(value: string): string {
 }
 
 function resolveWorkspace(handle: string, projectName: string, threadId: string): string {
-  const projectsRoot = process.env.STAFFX_PROJECTS_ROOT
-    ? process.env.STAFFX_PROJECTS_ROOT
-    : join(homedir(), ".staffx", "projects");
+  const projectsRoot = process.env.ACX_PROJECTS_ROOT
+    ? process.env.ACX_PROJECTS_ROOT
+    : join(homedir(), ".acx", "projects");
 
   return join(projectsRoot, "desktop", sanitizeComponent(handle), sanitizeComponent(projectName), sanitizeComponent(threadId));
 }

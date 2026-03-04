@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { query } from "./db.js";
 
-export const STAFFX_EVENT_TYPES = [
+export const ACX_EVENT_TYPES = [
   "chat.session.finished",
   "assistant.run.started",
   "assistant.run.progress",
@@ -12,11 +12,11 @@ export const STAFFX_EVENT_TYPES = [
   "thread.matrix.changed",
 ] as const;
 
-export type StaffXEventType = (typeof STAFFX_EVENT_TYPES)[number];
+export type ACXEventType = (typeof ACX_EVENT_TYPES)[number];
 
-export interface StaffXEvent { 
+export interface ACXEvent { 
   id: string;
-  type: StaffXEventType;
+  type: ACXEventType;
   aggregateType: string;
   aggregateId: string;
   occurredAt: string;
@@ -26,9 +26,9 @@ export interface StaffXEvent {
   version: number;
 }
 
-interface StaffXEventRow {
+interface ACXEventRow {
   id: string;
-  type: StaffXEventType;
+  type: ACXEventType;
   aggregate_type: string;
   aggregate_id: string;
   org_id: string | null;
@@ -39,7 +39,7 @@ interface StaffXEventRow {
 }
 
 export interface PublishEventInput {
-  type: StaffXEventType;
+  type: ACXEventType;
   aggregateType: string;
   aggregateId: string;
   orgId?: string | null;
@@ -57,7 +57,7 @@ export interface EventQuery {
   limit?: number;
 }
 
-function normalizeOccurredAt(row: StaffXEventRow): StaffXEvent {
+function normalizeOccurredAt(row: ACXEventRow): ACXEvent {
   const occurredAt = row.occurred_at instanceof Date ? row.occurred_at : new Date(row.occurred_at);
 
   return {
@@ -73,7 +73,7 @@ function normalizeOccurredAt(row: StaffXEventRow): StaffXEvent {
   };
 }
 
-export function encodeCursor(event: StaffXEvent): string {
+export function encodeCursor(event: ACXEvent): string {
   return `${encodeURIComponent(event.occurredAt)}|${encodeURIComponent(event.id)}`;
 }
 
@@ -95,9 +95,9 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export async function publishEvent(input: PublishEventInput): Promise<StaffXEvent> {
-  const row = await query<StaffXEventRow>(
-    `INSERT INTO staffx_events (
+export async function publishEvent(input: PublishEventInput): Promise<ACXEvent> {
+  const row = await query<ACXEventRow>(
+    `INSERT INTO acx_events (
        id, aggregate_type, aggregate_id, org_id, type, trace_id, payload, version, occurred_at
      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING id, type, aggregate_type, aggregate_id, org_id, occurred_at, trace_id, payload, version`,
@@ -126,7 +126,7 @@ function parseLimit(raw?: number): number {
   return Math.min(Math.max(Math.floor(raw), 1), 500);
 }
 
-export async function queryEvents(input: EventQuery): Promise<{ items: StaffXEvent[]; nextCursor: string | null }> {
+export async function queryEvents(input: EventQuery): Promise<{ items: ACXEvent[]; nextCursor: string | null }> {
   const limit = parseLimit(input.limit);
 
   let whereClause = "1 = 1";
@@ -170,9 +170,9 @@ export async function queryEvents(input: EventQuery): Promise<{ items: StaffXEve
     }
   }
 
-  const result = await query<StaffXEventRow>(
+  const result = await query<ACXEventRow>(
     `SELECT id, type, aggregate_type, aggregate_id, occurred_at, trace_id, payload, version
-     FROM staffx_events
+     FROM acx_events
      WHERE ${whereClause}
      ORDER BY occurred_at ASC, id ASC
      LIMIT $${params.length + 1}`,

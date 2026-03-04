@@ -35,8 +35,8 @@ export interface Project {
 const TEMPLATES = [
   { id: "blank", label: "Blank", description: "Empty project, start from scratch" },
   {
-    id: "staffx-openship-bundle-import",
-    label: "StaffX OpenShip runtime import",
+    id: "acx-openship-bundle-import",
+    label: "AntiClodeX OpenShip runtime import",
     description: "Imports the canonical OpenShip bundle from ./openship into the project",
   },
   {
@@ -223,7 +223,7 @@ export function Home({ projects, onCreateProject, onCheckProjectName }: HomeProp
         <button className="btn hero-cta" onClick={login}>Log In</button>
         <p style={{ textAlign: "center" }}>
           <i>
-            StaffX is the human control plane for AI-generated software:<br />
+            AntiClodeX is the human control plane for AI-generated software:<br />
             it lets domain experts go from a product description to a deployed,
             maintainable system<br />
             using curated reference architectures, with visual preview, and<br />

@@ -142,8 +142,8 @@ const ASSISTANT_MODELS: AssistantModelOption[] = [
 ];
 
 const DEFAULT_ASSISTANT_MODEL: AssistantModel = "claude-opus-4-6";
-const MODEL_STORAGE_KEY_PREFIX = "staffx-thread-agent-model";
-const MODEL_STORAGE_KEY_GLOBAL = "staffx-thread-agent-model-default";
+const MODEL_STORAGE_KEY_PREFIX = "acx-thread-agent-model";
+const MODEL_STORAGE_KEY_GLOBAL = "acx-thread-agent-model-default";
 const TOPOLOGY_ELK = new ELK();
 const TOPOLOGY_ELK_LAYOUT_OPTIONS = {
   "elk.algorithm": "layered",
@@ -3968,7 +3968,7 @@ export function ThreadPage({
                     <textarea
                       className="field-input thread-chat-input"
                       rows={4}
-                      placeholder="Ask StaffX anything"
+                      placeholder="Ask AntiClodeX anything"
                       value={chatInput}
                     onChange={(event) => setChatInput(event.target.value)}
                     disabled={isSendingChat || isChatInputsDisabled}

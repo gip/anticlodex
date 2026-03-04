@@ -1,6 +1,6 @@
 "id": "l.ui"
 "kind": "Library"
-"name": "@staffx/ui Shared UI Library"
+"name": "@acx/ui Shared UI Library"
 "metadata":
   "openshipKey": "ui"
   "ownership": "first_party"

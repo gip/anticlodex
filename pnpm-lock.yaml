@@ -20,7 +20,7 @@ importers:
       '@fastify/cors':
         specifier: ^11.0.0
         version: 11.2.0
-      '@staffx/agent-runtime':
+      '@acx/agent-runtime':
         specifier: workspace:*
         version: link:../../packages/agent-runtime
       fastify:
@@ -51,10 +51,10 @@ importers:
 
   apps/desktop:
     dependencies:
-      '@staffx/agent-runtime':
+      '@acx/agent-runtime':
         specifier: workspace:*
         version: link:../../packages/agent-runtime
-      '@staffx/ui':
+      '@acx/ui':
         specifier: workspace:*
         version: link:../../packages/ui
       react:
@@ -91,7 +91,7 @@ importers:
       '@auth0/auth0-react':
         specifier: ^2.2.4
         version: 2.13.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
-      '@staffx/ui':
+      '@acx/ui':
         specifier: workspace:*
         version: link:../../packages/ui
       react:

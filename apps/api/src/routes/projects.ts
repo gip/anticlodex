@@ -81,7 +81,7 @@ function computeDocumentHash(document: Pick<TemplateDocument, "kind" | "title" |
 }
 
 function resolveTemplateBundlePath(bundlePath: string): string {
-  const override = process.env.STAFFX_TEMPLATE_BUNDLE_PATH?.trim();
+  const override = process.env.ACX_TEMPLATE_BUNDLE_PATH?.trim();
   if (override) return resolve(override);
 
   const direct = resolve(process.cwd(), bundlePath);

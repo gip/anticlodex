@@ -16,10 +16,10 @@ import {
   type AgentRunResult,
   snapshotOpenShipBundle,
   summarizeOpenShipBundleChanges,
-} from "@staffx/agent-runtime";
+} from "@acx/agent-runtime";
 
 const DEFAULT_POLL_INTERVAL_MS = 1000;
-const DEFAULT_RUNNER_ID = process.env.STAFFX_AGENT_RUNNER_ID || "api-worker";
+const DEFAULT_RUNNER_ID = process.env.ACX_AGENT_RUNNER_ID || "api-worker";
 const OPENSHIP_BUNDLE_DIR_NAME = "openship";
 const OPENSHIP_MANIFEST_FILE_NAME = "openship.yaml";
 const OPENSHIP_ROOT_NODE_ID = "s.root";
@@ -901,7 +901,7 @@ export function startAgentRunner(options: AgentRunnerOptions = {}): () => void {
       const workspace = resolveThreadWorkspacePath({
         projectId: run.project_id,
         threadId: run.thread_id,
-        baseDir: process.env.STAFFX_PROJECTS_ROOT,
+        baseDir: process.env.ACX_PROJECTS_ROOT,
       });
 
       console.info("[agent-runner] starting", {

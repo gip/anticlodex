@@ -100,9 +100,9 @@ type CodexInvocationFailure = {
 
 function isCodexDebugEnabled(): boolean {
   return (
-    process.env.STAFFX_DEBUG_CODEX === "1"
-    || process.env.STAFFX_DEBUG_CODEx === "1"
-    || process.env.STAFFX_DEBUG_AGENT_RUNTIME === "1"
+    process.env.ACX_DEBUG_CODEX === "1"
+    || process.env.ACX_DEBUG_CODEx === "1"
+    || process.env.ACX_DEBUG_AGENT_RUNTIME === "1"
   );
 }
 
@@ -160,7 +160,7 @@ export async function runAgent(input: RunAgentInput): Promise<AgentRunResult> {
 }
 
 export function resolveThreadWorkspacePath(input: ResolveThreadWorkspacePathInput): string {
-  const baseDir = input.baseDir?.trim() || join(homedir(), ".staffx", "projects");
+  const baseDir = input.baseDir?.trim() || join(homedir(), ".acx", "projects");
   return join(baseDir, input.projectId, input.threadId);
 }
 

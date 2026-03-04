@@ -46,7 +46,7 @@ export function Header({
           <>
             <Link to="/" className="header-logo">
               <Logo />
-              StaffX
+              AntiClodeX
             </Link>
             {onToggleSidebar && isAuthenticated && (
               <button className="btn-icon btn-icon-theme header-sidebar-toggle-web" onClick={onToggleSidebar} aria-label="Toggle sidebar">
@@ -65,7 +65,7 @@ export function Header({
         <div className="header-center">
           <Link to="/" className="header-logo header-no-drag">
             <Logo />
-            StaffX
+            AntiClodeX
           </Link>
         </div>
       )}

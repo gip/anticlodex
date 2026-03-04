@@ -28,7 +28,7 @@ import {
   type Collaborator,
   type Concern,
   type SearchResult,
-} from "@staffx/ui";
+} from "@acx/ui";
 
 function normalizeApiUrl(raw: string): string {
   const trimmed = raw.trim().replace(/\/+$/, "");
@@ -1962,7 +1962,7 @@ function AppShell({
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     try {
-      return localStorage.getItem("staffx-sidebar") !== "false";
+      return localStorage.getItem("acx-sidebar") !== "false";
     } catch {
       return true;
     }
@@ -1971,7 +1971,7 @@ function AppShell({
   const toggleSidebar = useCallback(() => {
     setSidebarOpen((prev) => {
       const next = !prev;
-      try { localStorage.setItem("staffx-sidebar", String(next)); } catch {}
+      try { localStorage.setItem("acx-sidebar", String(next)); } catch {}
       return next;
     });
   }, []);

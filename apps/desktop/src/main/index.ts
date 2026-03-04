@@ -6,7 +6,7 @@ import { getAccessToken, getAuthState, login, logout, notifyRenderer } from "./a
 
 let mainWindow: BrowserWindow | null = null;
 let appIcon: Electron.NativeImage | null = null;
-const isClaudeAgentEnabled = process.env.STAFFX_ENABLE_CLAUDE_AGENT === "1";
+const isClaudeAgentEnabled = process.env.ACX_ENABLE_CLAUDE_AGENT === "1";
 
 function resolveIcon(): string | null {
   const candidates = [
@@ -22,12 +22,12 @@ function resolveIcon(): string | null {
 function loadAppIcon() {
   const iconPath = resolveIcon();
   if (!iconPath) {
-    console.warn("StaffX icon not found, using Electron default icon.");
+    console.warn("AntiClodeX icon not found, using Electron default icon.");
     return;
   }
   const icon = nativeImage.createFromPath(iconPath);
   if (icon.isEmpty()) {
-    console.warn(`Unable to load StaffX icon from ${iconPath}, using Electron default.`);
+    console.warn(`Unable to load AntiClodeX icon from ${iconPath}, using Electron default.`);
     return;
   }
   appIcon = icon;
@@ -75,7 +75,7 @@ ipcMain.handle("assistant:run", async (_event, payload: {
   runId: string;
 }) => {
   if (!isClaudeAgentEnabled) {
-    return { error: "Desktop agent processing is disabled. Set STAFFX_ENABLE_CLAUDE_AGENT=1." };
+    return { error: "Desktop agent processing is disabled. Set ACX_ENABLE_CLAUDE_AGENT=1." };
   }
   return startAssistantRunLocal(payload);
 });

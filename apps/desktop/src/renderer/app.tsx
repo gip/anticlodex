@@ -1958,6 +1958,7 @@ function AppShell({
   isAuthenticated: boolean;
   refreshProjects: () => void;
 }) {
+  const navigate = useNavigate();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     try {
@@ -1979,6 +1980,12 @@ function AppShell({
   const isProjectRoute = segments.length >= 2 && segments[0] !== "settings";
   const handle = isProjectRoute ? segments[0] : undefined;
   const projectName = isProjectRoute ? segments[1] : undefined;
+
+  useEffect(() => {
+    if (!isAuthenticated && location.pathname !== "/") {
+      navigate("/", { replace: true });
+    }
+  }, [isAuthenticated, location.pathname, navigate]);
 
   return (
     <>

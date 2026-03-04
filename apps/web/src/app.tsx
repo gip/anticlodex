@@ -254,7 +254,7 @@ async function resolveProject(
   handle: string,
   projectName: string,
 ): Promise<V1ProjectListItem | null> {
-  const projectsRes = await apiFetch("/projects");
+  const projectsRes = await apiFetch("/projects", undefined, { auth: "optional" });
   if (!projectsRes.ok) return null;
   const projectsData = await projectsRes.json() as V1ProjectListResponse;
   return projectsData.items.find((project) => project.ownerHandle === handle && project.name === projectName) ?? null;
@@ -813,6 +813,8 @@ function ProjectRoute({ onProjectMutated }: { onProjectMutated?: () => void }) {
 
       const threadRes = await apiFetch(
         `/threads?projectId=${encodeURIComponent(found.id)}&page=1&pageSize=200`,
+        undefined,
+        { auth: "optional" },
       );
       if (!threadRes.ok) {
         setNotFound(true);
@@ -1265,6 +1267,7 @@ function ThreadRoute({ onProjectMutated }: { onProjectMutated?: () => void }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const [detail, setDetail] = useState<ThreadDetailPayload | null>(null);
   const [threadProjectId, setThreadProjectId] = useState<string | null>(null);
+  const [isProjectResolved, setIsProjectResolved] = useState(false);
   const [notFound, setNotFound] = useState(false);
   const eventCursorRef = useRef<string | null>(null);
   const eventStreamAbortRef = useRef<AbortController | null>(null);
@@ -1296,23 +1299,31 @@ function ThreadRoute({ onProjectMutated }: { onProjectMutated?: () => void }) {
   }, [apiFetch]);
 
   useEffect(() => {
-    if (!isAuthenticated || !handle || !projectName) {
+    if (!handle || !projectName) {
       setThreadProjectId(null);
+      setIsProjectResolved(false);
       return;
     }
     setThreadProjectId(null);
+    setIsProjectResolved(false);
     let cancelled = false;
     resolveProject(apiFetch, handle, projectName)
       .then((projectRecord) => {
-        if (!cancelled) setThreadProjectId(projectRecord?.id ?? null);
+        if (!cancelled) {
+          setThreadProjectId(projectRecord?.id ?? null);
+          setIsProjectResolved(true);
+        }
       })
       .catch(() => {
-        if (!cancelled) setThreadProjectId(null);
+        if (!cancelled) {
+          setThreadProjectId(null);
+          setIsProjectResolved(true);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [apiFetch, handle, isAuthenticated, projectName]);
+  }, [apiFetch, handle, projectName]);
 
   const threadPathWithScope = useCallback((suffix = ""): string | null => {
     if (!threadId) return null;
@@ -1322,14 +1333,14 @@ function ThreadRoute({ onProjectMutated }: { onProjectMutated?: () => void }) {
 
   const refreshThread = useCallback(async () => {
     if (!threadId) return;
-    if (isNumericThreadRouteId(threadId) && !threadProjectId) return;
+    if (isNumericThreadRouteId(threadId) && (!isProjectResolved || !threadProjectId)) return;
     const scopedPath = threadPathWithScope();
     if (!scopedPath) return;
-    const threadRes = await apiFetch(scopedPath, undefined, { auth: "required" });
+    const threadRes = await apiFetch(scopedPath, undefined, { auth: "optional" });
     if (!threadRes.ok) return;
     const nextDetail = await threadRes.json() as ThreadDetailPayload;
     setDetail(nextDetail);
-  }, [apiFetch, threadId, threadPathWithScope, threadProjectId]);
+  }, [apiFetch, isProjectResolved, threadId, threadPathWithScope, threadProjectId]);
 
   const refreshThreadDebounced = useCallback(() => {
     if (eventRefreshPromiseRef.current) return;
@@ -1554,7 +1565,16 @@ function ThreadRoute({ onProjectMutated }: { onProjectMutated?: () => void }) {
 
   useEffect(() => {
     if (!threadId) return;
-    if (isNumericThreadRouteId(threadId) && !threadProjectId) return;
+    if (isNumericThreadRouteId(threadId) && !isProjectResolved) {
+      setNotFound(false);
+      setDetail(null);
+      return;
+    }
+    if (isNumericThreadRouteId(threadId) && !threadProjectId) {
+      setDetail(null);
+      setNotFound(true);
+      return;
+    }
     setNotFound(false);
     setDetail(null);
 
@@ -1564,7 +1584,7 @@ function ThreadRoute({ onProjectMutated }: { onProjectMutated?: () => void }) {
         setNotFound(true);
         return;
       }
-      const res = await apiFetch(scopedPath, undefined, { auth: "required" });
+      const res = await apiFetch(scopedPath, undefined, { auth: "optional" });
       if (res.status === 404) {
         setNotFound(true);
         return;
@@ -1576,7 +1596,7 @@ function ThreadRoute({ onProjectMutated }: { onProjectMutated?: () => void }) {
     };
 
     loadThread().catch(() => setNotFound(true));
-  }, [threadId, apiFetch, threadPathWithScope, threadProjectId]);
+  }, [threadId, apiFetch, isProjectResolved, threadPathWithScope, threadProjectId]);
 
   if (notFound) {
     return (
@@ -1864,7 +1884,6 @@ function AppShell({
   isAuthenticated: boolean;
   refreshProjects: () => void;
 }) {
-  const navigate = useNavigate();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     try {
@@ -1885,12 +1904,6 @@ function AppShell({
   const segments = location.pathname.replace(/^\//, "").split("/").filter(Boolean);
   const activeProjectOwner = segments.length >= 2 && segments[0] !== "settings" ? segments[0] : undefined;
   const activeProjectName = segments.length >= 2 && segments[0] !== "settings" ? segments[1] : undefined;
-
-  useEffect(() => {
-    if (!isAuthenticated && location.pathname !== "/") {
-      navigate("/", { replace: true });
-    }
-  }, [isAuthenticated, location.pathname, navigate]);
 
   return (
     <>

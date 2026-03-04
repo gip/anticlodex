@@ -1864,6 +1864,7 @@ function AppShell({
   isAuthenticated: boolean;
   refreshProjects: () => void;
 }) {
+  const navigate = useNavigate();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     try {
@@ -1884,6 +1885,12 @@ function AppShell({
   const segments = location.pathname.replace(/^\//, "").split("/").filter(Boolean);
   const activeProjectOwner = segments.length >= 2 && segments[0] !== "settings" ? segments[0] : undefined;
   const activeProjectName = segments.length >= 2 && segments[0] !== "settings" ? segments[1] : undefined;
+
+  useEffect(() => {
+    if (!isAuthenticated && location.pathname !== "/") {
+      navigate("/", { replace: true });
+    }
+  }, [isAuthenticated, location.pathname, navigate]);
 
   return (
     <>

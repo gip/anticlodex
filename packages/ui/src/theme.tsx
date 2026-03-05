@@ -24,19 +24,19 @@ function getSystemTheme(): Theme {
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setTheme] = useState<Theme>(() => {
     if (typeof window === "undefined") return "light";
-    const stored = localStorage.getItem("staffx-theme") as Theme | null;
+    const stored = localStorage.getItem("acx-theme") as Theme | null;
     return stored ?? getSystemTheme();
   });
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem("staffx-theme", theme);
+    localStorage.setItem("acx-theme", theme);
   }, [theme]);
 
   useEffect(() => {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const handler = () => {
-      if (!localStorage.getItem("staffx-theme")) {
+      if (!localStorage.getItem("acx-theme")) {
         setTheme(mq.matches ? "dark" : "light");
       }
     };

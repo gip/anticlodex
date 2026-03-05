@@ -43,6 +43,12 @@
   - Create `nodes/<newNodeId>/node.yaml`.
   - Set a unique `id`.
   - Set valid `kind`, `name`, optional `parentId`, and consistent `metadata`.
+  - Every node metadata MUST include:
+    - `ownership: first_party | third_party`
+    - `boundary: internal | external`
+  - For `Host` nodes, names MUST start with:
+    - `First-Party Host` when `ownership: first_party`
+    - `Third-Party Service Host` or `External Service Host` when `ownership: third_party`
   - Add at least one valid `matrix` concern entry.
   - Add connecting edge entries in `edges/edges.yaml` (or leave disconnected, if intended for draft).
 - Move a node:
@@ -75,5 +81,7 @@
 
 - Confirm every changed topology file remains valid YAML.
 - Confirm `openship.yaml`, `edges/edges.yaml`, and affected `nodes/*/node.yaml` are updated together when topology changes.
+- Confirm every changed node defines `metadata.ownership` and `metadata.boundary` with valid values.
+- Confirm every changed `Host` name follows ownership-based naming conventions.
 - Confirm matrix references still use valid hashes and concern names.
 - Mention which topology files changed and why before finishing.

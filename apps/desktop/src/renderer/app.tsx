@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   AuthContext,
   useAuth,
   Header,
+  Sidebar,
   Home,
   ProjectPage,
   ProjectSettingsPage,
@@ -13,8 +14,6 @@ import {
   setNavigate,
   type AuthUser,
   type AssistantRunResponse,
-  type Collaborator,
-  type Concern,
   type UserProfile,
   type ChatMessage,
   type MatrixDocument,
@@ -26,9 +25,264 @@ import {
   type IntegrationStatusRecord,
   type ThreadDetail,
   type ThreadDetailPayload,
-} from "@staffx/ui";
+  type Collaborator,
+  type Concern,
+  type SearchResult,
+} from "@acx/ui";
 
-const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
+function normalizeApiUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  if (!trimmed) return "http://localhost:3001/v1";
+  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+}
+
+function isNumericThreadRouteId(threadId: string): boolean {
+  return /^\d+$/.test(threadId.trim());
+}
+
+function appendProjectScope(path: string, projectId: string | null): string {
+  if (!projectId) return path;
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}projectId=${encodeURIComponent(projectId)}`;
+}
+
+const API_URL = normalizeApiUrl(import.meta.env.VITE_API_URL ?? "http://localhost:3001");
+
+interface V1ProjectListItem {
+  id: string;
+  name: string;
+  description: string | null;
+  visibility: "public" | "private";
+  accessRole: string;
+  ownerHandle: string;
+  createdAt: string;
+  threads?: Array<{
+    id: string;
+    title: string | null;
+    description: string | null;
+    projectThreadId?: number | null;
+    status: "open" | "closed" | "committed";
+    sourceThreadId?: string | null;
+    updatedAt: string;
+    createdAt?: string;
+  }>;
+  threadCount?: number;
+}
+
+interface V1ProjectListResponse {
+  items: V1ProjectListItem[];
+  page?: number;
+  pageSize?: number;
+  nextCursor?: string | null;
+}
+
+interface V1ThreadListItem {
+  id: string;
+  projectId: string;
+  projectThreadId: number | null;
+  sourceThreadId: string | null;
+  title: string | null;
+  description: string | null;
+  status: "open" | "closed" | "committed";
+  createdAt: string;
+  updatedAt: string;
+  accessRole: string;
+}
+
+interface V1ThreadListResponse {
+  items: V1ThreadListItem[];
+  page?: number;
+  pageSize?: number;
+  nextCursor?: string | null;
+}
+
+interface V1ProjectSettingsPayload {
+  accessRole: string;
+  visibility: "public" | "private";
+  projectRoles: string[];
+  concerns: Concern[];
+  collaborators: Collaborator[];
+}
+
+interface V1RunStartResponse {
+  runId?: string;
+  status?: "queued" | "running" | "success" | "failed" | "cancelled";
+  mode?: "direct" | "plan";
+  threadId?: string;
+  systemId?: string;
+}
+
+interface V1EventItem {
+  id: string;
+  type: string;
+  aggregateType: string;
+  aggregateId: string;
+  occurredAt: string;
+  traceId: string | null;
+  payload: Record<string, unknown>;
+  version: number;
+}
+
+interface V1ParsedSSEPacket {
+  type: string;
+  id: string | null;
+  data: string;
+}
+
+function parseSSEPackets(buffer: string): {
+  packets: V1ParsedSSEPacket[];
+  remainder: string;
+} {
+  const chunks = buffer.split("\n\n");
+  const remainder = chunks.pop() ?? "";
+  const packets = chunks
+    .map((chunk) => {
+      const lines = chunk.split("\n");
+      let type = "message";
+      let id: string | null = null;
+      const payloadLines: string[] = [];
+
+      for (const line of lines) {
+        if (line.startsWith(":")) continue;
+        if (line.startsWith("event:")) {
+          type = line.slice(6).trim() || "message";
+          continue;
+        }
+        if (line.startsWith("id:")) {
+          id = line.slice(3).trim() || null;
+          continue;
+        }
+        if (line.startsWith("data:")) {
+          payloadLines.push(line.slice(5));
+        }
+      }
+
+      const data = payloadLines.join("\n").trim();
+      if (!data) return null;
+      return { type, id, data };
+    })
+    .filter((packet): packet is V1ParsedSSEPacket => packet !== null);
+
+  return { packets, remainder };
+}
+
+function eventCursorFromItem(event: V1EventItem): string {
+  return `${encodeURIComponent(event.occurredAt)}|${encodeURIComponent(event.id)}`;
+}
+
+function extractThreadIdFromEventPayload(event: V1EventItem): string | null {
+  const candidate = event.payload?.threadId;
+  return typeof candidate === "string" ? candidate : null;
+}
+
+function isThreadEvent(event: V1EventItem, threadId: string): boolean {
+  if (event.aggregateType === "thread" && event.aggregateId === threadId) return true;
+  return extractThreadIdFromEventPayload(event) === threadId;
+}
+
+function normalizeProject(item: V1ProjectListItem): Project {
+  return {
+    id: item.id,
+    name: item.name,
+    description: item.description,
+    accessRole: item.accessRole,
+    visibility: item.visibility,
+    ownerHandle: item.ownerHandle,
+    createdAt: item.createdAt,
+    threads: item.threads?.map((thread) => ({
+      id: thread.id,
+      projectThreadId: thread.projectThreadId,
+      title: thread.title,
+      description: thread.description,
+      status: thread.status,
+      sourceThreadId: thread.sourceThreadId,
+      updatedAt: thread.updatedAt,
+      createdAt: thread.createdAt,
+    })) ?? [],
+  };
+}
+
+function normalizeThread(row: V1ThreadListItem): {
+  id: string;
+  title: string | null;
+  description: string | null;
+  projectThreadId?: number | null;
+  status: "open" | "closed" | "committed";
+  sourceThreadId?: string | null;
+  updatedAt: string;
+  createdAt: string;
+} {
+  return {
+    id: row.id,
+    projectThreadId: row.projectThreadId,
+    title: row.title,
+    description: row.description,
+    status: row.status,
+    sourceThreadId: row.sourceThreadId,
+    updatedAt: row.updatedAt,
+    createdAt: row.createdAt,
+  };
+}
+
+function toThreadDetailFromSummary(
+  row: {
+    id: string;
+    title: string | null;
+    description: string | null;
+    status: "open" | "closed" | "committed";
+    createdAt?: string;
+    createdByHandle?: string;
+    ownerHandle?: string;
+    projectName?: string;
+    accessRole?: string;
+  },
+  project: V1ProjectListItem,
+): ThreadDetail {
+  return {
+    id: row.id,
+    title: row.title ?? "Thread",
+    description: row.description,
+    status: row.status,
+    createdAt: row.createdAt ?? new Date().toISOString(),
+    createdByHandle: row.createdByHandle ?? project.ownerHandle,
+    ownerHandle: row.ownerHandle ?? project.ownerHandle,
+    projectName: row.projectName ?? project.name,
+    accessRole: row.accessRole ?? project.accessRole,
+  };
+}
+
+async function resolveProject(
+  apiFetch: ReturnType<typeof useApi>,
+  handle: string,
+  projectName: string,
+): Promise<V1ProjectListItem | null> {
+  const projectsRes = await apiFetch("/projects");
+  if (!projectsRes.ok) return null;
+  const projectsData = await projectsRes.json() as V1ProjectListResponse;
+  return (
+    projectsData.items.find((project) => project.ownerHandle === handle && project.name === projectName) ??
+    null
+  );
+}
+
+function toEnvelopePayload<T>(raw: {
+  items?: T[];
+  page?: number;
+  pageSize?: number;
+  nextCursor?: string | null;
+}): {
+  items: T[];
+  page: number;
+  pageSize: number;
+  nextCursor: string | null;
+} {
+  return {
+    items: raw.items ?? [],
+    page: raw.page ?? 1,
+    pageSize: raw.pageSize ?? 50,
+    nextCursor: raw.nextCursor ?? null,
+  };
+}
 
 interface ElectronAuthAPI {
   getState: () => Promise<{ isAuthenticated: boolean }>;
@@ -66,6 +320,7 @@ interface AssistantRunResultResponse {
     actionType: string;
     actionPosition: number;
     content: string;
+    senderName?: string;
     createdAt: string;
   }>;
   threadState?: ThreadDetailPayload;
@@ -77,6 +332,7 @@ interface ElectronAssistantAPI {
     handle: string;
     projectName: string;
     threadId: string;
+    projectId?: string;
     runId: string;
   }) => Promise<AssistantRunResultResponse>;
 }
@@ -312,6 +568,12 @@ function mergeThreadStateFromRun(
 
 async function readError(res: Response, fallback: string) {
   const body = await res.json().catch(() => ({}));
+  const title = typeof body.title === "string" ? body.title : null;
+  const detail = typeof body.detail === "string" ? body.detail : null;
+  if (title && detail) {
+    return `${title}: ${detail}`;
+  }
+
   if (typeof body.code === "string" && body.code === "INTEGRATION_RECONNECT") {
     const provider = typeof body.provider === "string" ? body.provider : null;
     const status = typeof body.status === "string" ? body.status : null;
@@ -385,7 +647,7 @@ function HomeRoute({
             const body = await res.json().catch(() => ({}));
             return { error: body.error ?? "Failed to create project" };
           }
-          const project = await res.json();
+          const project = normalizeProject(await res.json());
           setProjects((prev) => [project, ...prev]);
         } catch (error) {
           if (error instanceof Error && error.message.trim()) {
@@ -550,7 +812,7 @@ function AccountSettingsRoute({ isAuthenticated }: { isAuthenticated: boolean })
   );
 }
 
-function ProjectRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
+function ProjectRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: boolean; onProjectMutated?: () => void }) {
   const { handle, project: projectName } = useParams<{ handle: string; project: string }>();
   const apiFetch = useApi();
   const [project, setProject] = useState<Project | null>(null);
@@ -562,15 +824,30 @@ function ProjectRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
     setNotFound(false);
     setProject(null);
 
-    apiFetch(`/projects/${encodeURIComponent(handle)}/${encodeURIComponent(projectName)}`)
-      .then(async (res) => {
-        if (!res.ok) {
-          setNotFound(true);
-          return;
-        }
-        setProject(await res.json());
-      })
-      .catch(() => setNotFound(true));
+    const loadProject = async () => {
+      const found = await resolveProject(apiFetch, handle, projectName);
+      if (!found) {
+        setNotFound(true);
+        return;
+      }
+
+      const threadRes = await apiFetch(
+        `/threads?projectId=${encodeURIComponent(found.id)}&page=1&pageSize=200`,
+      );
+      if (!threadRes.ok) {
+        setNotFound(true);
+        return;
+      }
+
+      const threadPayload = await threadRes.json() as V1ThreadListResponse;
+      const threads = toEnvelopePayload(threadPayload).items.map((item) => normalizeThread(item));
+      setProject({
+        ...normalizeProject(found),
+        threads,
+      });
+    };
+
+    loadProject().catch(() => setNotFound(true));
   }, [isAuthenticated, handle, projectName, apiFetch]);
 
   if (notFound) {
@@ -592,11 +869,49 @@ function ProjectRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
   return (
     <ProjectPage
       project={project}
+      onUpdateDescription={async (description) => {
+        if (!handle || !projectName) {
+          return { error: "Project not found" };
+        }
+        try {
+          const res = await apiFetch(
+            `/projects/${encodeURIComponent(handle)}/${encodeURIComponent(projectName)}/description`,
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ description }),
+            },
+          );
+          if (!res.ok) {
+            return { error: await readError(res, "Failed to update project description") };
+          }
+          const data = await res.json() as { description: string | null };
+          setProject((current) => (
+            current
+              ? {
+                  ...current,
+                  description: data.description,
+                }
+              : current
+          ));
+          onProjectMutated?.();
+          return data;
+        } catch (error: unknown) {
+          if (error instanceof Error && error.message.trim()) {
+            return { error: error.message };
+          }
+          return { error: "Failed to update project description" };
+        }
+      }}
       onCloseThread={async (threadProjectId) => {
         try {
           const res = await apiFetch(
-            `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/thread/${threadProjectId}/close`,
-            { method: "POST" },
+            appendProjectScope(`/threads/${encodeURIComponent(threadProjectId)}`, project.id),
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ status: "closed" }),
+            },
           );
           if (!res.ok) {
             return { error: await readError(res, "Failed to close thread") };
@@ -607,7 +922,12 @@ function ProjectRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
               ? {
                   ...current,
                   threads: current.threads.map((thread) =>
-                    thread.projectThreadId === threadProjectId ? { ...thread, status: data.thread.status } : thread,
+                    (
+                      thread.id === threadProjectId
+                      || (thread.projectThreadId != null && String(thread.projectThreadId) === threadProjectId)
+                    )
+                      ? { ...thread, status: data.thread.status }
+                      : thread,
                   ),
                 }
               : current
@@ -623,8 +943,12 @@ function ProjectRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
       onCommitThread={async (threadProjectId) => {
         try {
           const res = await apiFetch(
-            `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/thread/${threadProjectId}/commit`,
-            { method: "POST" },
+            appendProjectScope(`/threads/${encodeURIComponent(threadProjectId)}`, project.id),
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ status: "committed" }),
+            },
           );
           if (!res.ok) {
             return { error: await readError(res, "Failed to commit thread") };
@@ -635,7 +959,12 @@ function ProjectRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
               ? {
                   ...current,
                   threads: current.threads.map((thread) =>
-                    thread.projectThreadId === threadProjectId ? { ...thread, status: data.thread.status } : thread,
+                    (
+                      thread.id === threadProjectId
+                      || (thread.projectThreadId != null && String(thread.projectThreadId) === threadProjectId)
+                    )
+                      ? { ...thread, status: data.thread.status }
+                      : thread,
                   ),
                 }
               : current
@@ -653,21 +982,57 @@ function ProjectRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
         const description = typeof payload?.description === "string" ? payload.description.trim() : "";
         try {
           const res = await apiFetch(
-            `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/thread/${threadProjectId}/clone`,
+            `/threads`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ title, description }),
+              body: JSON.stringify({
+                projectId: project?.id,
+                sourceThreadId: threadProjectId,
+                title,
+                description,
+              }),
             },
           );
           if (!res.ok) {
             return { error: await readError(res, "Failed to create thread") };
           }
-          const data = (await res.json()) as { thread: ThreadDetail };
-          if (!data?.thread?.projectThreadId) {
+          const data = (await res.json()) as V1ThreadListItem;
+          if (!data?.id) {
             return { error: "New thread not found" };
           }
-          return data;
+          setProject((current) => (
+            current
+              ? {
+                  ...current,
+                  threads: [...current.threads, normalizeThread({
+                    id: data.id,
+                    title: data.title,
+                    description: data.description,
+                    status: data.status,
+                    sourceThreadId: data.sourceThreadId,
+                    createdAt: data.createdAt,
+                    updatedAt: data.updatedAt,
+                    projectId: data.projectId,
+                    accessRole: data.accessRole,
+                  })],
+                }
+              : current
+          ));
+          onProjectMutated?.();
+          return {
+            thread: {
+              id: data.id,
+              title: data.title,
+              description: data.description,
+              status: data.status,
+              createdAt: data.createdAt,
+              createdByHandle: project?.ownerHandle ?? handle ?? "unknown",
+              ownerHandle: project?.ownerHandle ?? handle ?? "unknown",
+              projectName: project?.name ?? projectName,
+              accessRole: data.accessRole,
+            },
+          };
         } catch (error: unknown) {
           if (error instanceof Error && error.message.trim()) {
             return { error: error.message };
@@ -679,41 +1044,68 @@ function ProjectRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
   );
 }
 
-function SettingsRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
+function SettingsRoute({
+  isAuthenticated,
+  onProjectMutated,
+}: {
+  isAuthenticated: boolean;
+  onProjectMutated?: () => void;
+}) {
   const { handle, project: projectName } = useParams<{ handle: string; project: string }>();
+  const navigate = useNavigate();
   const apiFetch = useApi();
-  const [data, setData] = useState<{
-    accessRole: string;
-    visibility: "public" | "private";
-    collaborators: Collaborator[];
-    projectRoles: string[];
-    concerns: Concern[];
-  } | null>(null);
+  const [settings, setSettings] = useState<V1ProjectSettingsPayload | null>(null);
   const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
-    if (!isAuthenticated || !handle || !projectName) return;
+    if (!isAuthenticated) {
+      setSettings(null);
+      setNotFound(false);
+      return;
+    }
+    if (!handle || !projectName) {
+      setSettings(null);
+      setNotFound(true);
+      return;
+    }
 
-    apiFetch(`/projects/${encodeURIComponent(handle)}/${encodeURIComponent(projectName)}/collaborators`)
+    setSettings(null);
+    setNotFound(false);
+    let cancelled = false;
+
+    apiFetch(
+      `/projects/${encodeURIComponent(handle)}/${encodeURIComponent(projectName)}/collaborators`,
+    )
       .then(async (res) => {
-        if (!res.ok) {
+        if (cancelled) return;
+        if (res.status === 404) {
           setNotFound(true);
           return;
         }
-        setData(await res.json());
+        if (!res.ok) {
+          throw new Error(await readError(res, "Failed to load project settings"));
+        }
+        const data = await res.json() as V1ProjectSettingsPayload;
+        if (!cancelled) setSettings(data);
       })
-      .catch(() => setNotFound(true));
-  }, [isAuthenticated, handle, projectName, apiFetch]);
+      .catch(() => {
+        if (!cancelled) setNotFound(true);
+      });
 
-  if (notFound) {
+    return () => {
+      cancelled = true;
+    };
+  }, [apiFetch, handle, isAuthenticated, projectName]);
+
+  if (!isAuthenticated) {
     return (
       <main className="main">
-        <p className="status-text">Project not found</p>
+        <p className="status-text">Sign in to access project settings.</p>
       </main>
     );
   }
 
-  if (!data) {
+  if (!notFound && !settings) {
     return (
       <main className="main">
         <p className="status-text">Loading…</p>
@@ -721,125 +1113,169 @@ function SettingsRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
     );
   }
 
+  if (notFound || !settings || !handle || !projectName) {
+    return (
+      <main className="main">
+        <p className="status-text">Project not found</p>
+      </main>
+    );
+  }
+
+  const encodedHandle = encodeURIComponent(handle);
+  const encodedProject = encodeURIComponent(projectName);
+  const basePath = `/projects/${encodedHandle}/${encodedProject}`;
+
   return (
     <ProjectSettingsPage
-      projectOwnerHandle={handle!}
-      projectName={projectName!}
-      accessRole={data.accessRole}
-      visibility={data.visibility}
-      collaborators={data.collaborators}
-      projectRoles={data.projectRoles}
-      concerns={data.concerns}
-      onSearchUsers={async (q) => {
-        const res = await apiFetch(`/users/search?q=${encodeURIComponent(q)}`);
-        if (!res.ok) return [];
-        return res.json();
+      projectOwnerHandle={handle}
+      projectName={projectName}
+      accessRole={settings.accessRole}
+      visibility={settings.visibility}
+      collaborators={settings.collaborators}
+      projectRoles={settings.projectRoles}
+      concerns={settings.concerns}
+      onSearchUsers={async (query) => {
+        if (!query.trim()) return [];
+        try {
+          const res = await apiFetch(`/users/search?q=${encodeURIComponent(query.trim())}`);
+          if (!res.ok) return [];
+          return await res.json() as SearchResult[];
+        } catch {
+          return [];
+        }
       }}
       onAddCollaborator={async (targetHandle, role, projectRoles) => {
-        const res = await apiFetch(
-          `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/collaborators`,
-          {
+        try {
+          const res = await apiFetch(`${basePath}/collaborators`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ handle: targetHandle, role, projectRoles }),
-          },
-        );
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          return { error: body.error ?? "Failed to add collaborator" };
+          });
+          if (!res.ok) {
+            return { error: await readError(res, "Failed to add collaborator") };
+          }
+        } catch (error: unknown) {
+          if (error instanceof Error && error.message.trim()) return { error: error.message };
+          return { error: "Failed to add collaborator" };
         }
       }}
       onRemoveCollaborator={async (targetHandle) => {
-        const res = await apiFetch(
-          `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/collaborators/${encodeURIComponent(targetHandle)}`,
-          { method: "DELETE" },
-        );
-        if (!res.ok && res.status !== 204) {
-          const body = await res.json().catch(() => ({}));
-          return { error: body.error ?? "Failed to remove collaborator" };
+        try {
+          const res = await apiFetch(`${basePath}/collaborators/${encodeURIComponent(targetHandle)}`, {
+            method: "DELETE",
+          });
+          if (!res.ok) {
+            return { error: await readError(res, "Failed to remove collaborator") };
+          }
+        } catch (error: unknown) {
+          if (error instanceof Error && error.message.trim()) return { error: error.message };
+          return { error: "Failed to remove collaborator" };
         }
       }}
       onAddRole={async (name) => {
-        const res = await apiFetch(
-          `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/roles`,
-          {
+        try {
+          const res = await apiFetch(`${basePath}/roles`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ name }),
-          },
-        );
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          return { error: body.error ?? "Failed to add role" };
-        }
-      }}
-      onAddConcern={async (name) => {
-        const res = await apiFetch(
-          `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/concerns`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name }),
-          },
-        );
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          return { error: body.error ?? "Failed to add concern" };
-        }
-      }}
-      onDeleteConcern={async (name) => {
-        const res = await apiFetch(
-          `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/concerns/${encodeURIComponent(name)}`,
-          { method: "DELETE" },
-        );
-        if (!res.ok && res.status !== 204) {
-          const body = await res.json().catch(() => ({}));
-          return { error: body.error ?? "Failed to delete concern" };
+          });
+          if (!res.ok) {
+            return { error: await readError(res, "Failed to add role") };
+          }
+        } catch (error: unknown) {
+          if (error instanceof Error && error.message.trim()) return { error: error.message };
+          return { error: "Failed to add role" };
         }
       }}
       onDeleteRole={async (name) => {
-        const res = await apiFetch(
-          `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/roles/${encodeURIComponent(name)}`,
-          { method: "DELETE" },
-        );
-        if (!res.ok && res.status !== 204) {
-          const body = await res.json().catch(() => ({}));
-          return { error: body.error ?? "Failed to delete role" };
+        try {
+          const res = await apiFetch(`${basePath}/roles/${encodeURIComponent(name)}`, {
+            method: "DELETE",
+          });
+          if (!res.ok) {
+            return { error: await readError(res, "Failed to delete role") };
+          }
+        } catch (error: unknown) {
+          if (error instanceof Error && error.message.trim()) return { error: error.message };
+          return { error: "Failed to delete role" };
+        }
+      }}
+      onAddConcern={async (name) => {
+        try {
+          const res = await apiFetch(`${basePath}/concerns`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name }),
+          });
+          if (!res.ok) {
+            return { error: await readError(res, "Failed to add concern") };
+          }
+        } catch (error: unknown) {
+          if (error instanceof Error && error.message.trim()) return { error: error.message };
+          return { error: "Failed to add concern" };
+        }
+      }}
+      onDeleteConcern={async (name) => {
+        try {
+          const res = await apiFetch(`${basePath}/concerns/${encodeURIComponent(name)}`, {
+            method: "DELETE",
+          });
+          if (!res.ok) {
+            return { error: await readError(res, "Failed to delete concern") };
+          }
+        } catch (error: unknown) {
+          if (error instanceof Error && error.message.trim()) return { error: error.message };
+          return { error: "Failed to delete concern" };
         }
       }}
       onUpdateMemberRoles={async (targetHandle, projectRoles) => {
-        const res = await apiFetch(
-          `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/collaborators/${encodeURIComponent(targetHandle)}/roles`,
-          {
+        try {
+          const res = await apiFetch(`${basePath}/collaborators/${encodeURIComponent(targetHandle)}/roles`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ projectRoles }),
-          },
-        );
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          return { error: body.error ?? "Failed to update roles" };
+          });
+          if (!res.ok) {
+            return { error: await readError(res, "Failed to update member roles") };
+          }
+        } catch (error: unknown) {
+          if (error instanceof Error && error.message.trim()) return { error: error.message };
+          return { error: "Failed to update member roles" };
         }
       }}
       onUpdateVisibility={async (visibility) => {
-        const res = await apiFetch(
-          `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/visibility`,
-          {
+        try {
+          const res = await apiFetch(`${basePath}/visibility`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ visibility }),
-          },
-        );
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          return { error: body.error ?? "Failed to update visibility" };
+          });
+          if (!res.ok) {
+            return { error: await readError(res, "Failed to update visibility") };
+          }
+        } catch (error: unknown) {
+          if (error instanceof Error && error.message.trim()) return { error: error.message };
+          return { error: "Failed to update visibility" };
+        }
+      }}
+      onArchiveProject={async () => {
+        try {
+          const res = await apiFetch(`${basePath}/archive`, { method: "POST" });
+          if (!res.ok) {
+            return { error: await readError(res, "Failed to archive project") };
+          }
+          onProjectMutated?.();
+          navigate("/");
+        } catch (error: unknown) {
+          if (error instanceof Error && error.message.trim()) return { error: error.message };
+          return { error: "Failed to archive project" };
         }
       }}
     />
   );
 }
 
-function ThreadRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
+function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: boolean; onProjectMutated?: () => void }) {
   const { handle, project: projectName, threadId } = useParams<{
     handle: string;
     project: string;
@@ -848,11 +1284,255 @@ function ThreadRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
   const apiFetch = useApi();
   const [searchParams, setSearchParams] = useSearchParams();
   const [detail, setDetail] = useState<ThreadDetailPayload | null>(null);
+  const [threadProjectId, setThreadProjectId] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
+  const eventCursorRef = useRef<string | null>(null);
+  const eventStreamAbortRef = useRef<AbortController | null>(null);
+  const eventPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const eventRefreshPromiseRef = useRef<Promise<void> | null>(null);
   const [integrationStatuses, setIntegrationStatuses] = useState<IntegrationStatusRecord>({
     notion: "disconnected",
     google: "disconnected",
   });
+
+  useEffect(() => {
+    if (!isAuthenticated || !handle || !projectName) {
+      setThreadProjectId(null);
+      return;
+    }
+    setThreadProjectId(null);
+    let cancelled = false;
+    resolveProject(apiFetch, handle, projectName)
+      .then((projectRecord) => {
+        if (!cancelled) setThreadProjectId(projectRecord?.id ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setThreadProjectId(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiFetch, handle, isAuthenticated, projectName]);
+
+  const threadPathWithScope = useCallback((suffix = ""): string | null => {
+    if (!threadId) return null;
+    const path = `/threads/${encodeURIComponent(threadId)}${suffix}`;
+    return appendProjectScope(path, threadProjectId);
+  }, [threadId, threadProjectId]);
+
+  const resolveThreadProjectId = useCallback(async (): Promise<string | null> => {
+    if (threadProjectId) return threadProjectId;
+    if (!handle || !projectName) return null;
+    const projectRecord = await resolveProject(apiFetch, handle, projectName);
+    const resolved = projectRecord?.id ?? null;
+    if (resolved) setThreadProjectId(resolved);
+    return resolved;
+  }, [apiFetch, handle, projectName, threadProjectId]);
+
+  const refreshThread = useCallback(async () => {
+    if (!threadId) return;
+    if (isNumericThreadRouteId(threadId) && !threadProjectId) return;
+    const scopedPath = threadPathWithScope();
+    if (!scopedPath) return;
+    const threadRes = await apiFetch(scopedPath);
+    if (!threadRes.ok) return;
+    const nextDetail = (await threadRes.json()) as ThreadDetailPayload;
+    setDetail(nextDetail);
+  }, [apiFetch, threadId, threadPathWithScope, threadProjectId]);
+
+  const refreshThreadDebounced = useCallback(() => {
+    if (eventRefreshPromiseRef.current) return;
+    const refresh = (async () => {
+      try {
+        await refreshThread();
+      } catch (error) {
+        console.error("Thread refresh failed:", error);
+      } finally {
+        if (eventRefreshPromiseRef.current === refresh) {
+          eventRefreshPromiseRef.current = null;
+        }
+      }
+    })();
+    eventRefreshPromiseRef.current = refresh;
+  }, [refreshThread]);
+
+  const handleThreadEvent = useCallback(
+    async (event: V1EventItem) => {
+      if (!threadId) return;
+      const detailThreadId = detail?.thread.id;
+      if (!isThreadEvent(event, threadId) && !(detailThreadId && isThreadEvent(event, detailThreadId))) return;
+      if (
+        event.type === "assistant.run.started"
+        || event.type === "assistant.run.progress"
+        || event.type === "assistant.run.waiting_input"
+        || event.type === "assistant.run.completed"
+        || event.type === "assistant.run.failed"
+        || event.type === "assistant.run.cancelled"
+        || event.type === "thread.matrix.changed"
+        || event.type === "chat.session.finished"
+      ) {
+        refreshThreadDebounced();
+      }
+    },
+    [detail?.thread.id, refreshThreadDebounced, threadId],
+  );
+
+  const processEventPayload = useCallback(async (event: V1EventItem) => {
+    try {
+      await handleThreadEvent(event);
+    } catch (error) {
+      console.error("Failed to process v1 event:", error);
+    }
+  }, [handleThreadEvent]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !threadId) return;
+
+    let mounted = true;
+    let pollingOnly = false;
+    eventCursorRef.current = null;
+
+    const stopStream = () => {
+      if (eventStreamAbortRef.current) {
+        eventStreamAbortRef.current.abort();
+        eventStreamAbortRef.current = null;
+      }
+    };
+
+    const stopPolling = () => {
+      if (eventPollTimerRef.current) {
+        clearTimeout(eventPollTimerRef.current);
+        eventPollTimerRef.current = null;
+      }
+    };
+
+    const startPolling = () => {
+      if (!mounted || pollingOnly) return;
+      pollingOnly = true;
+
+      const poll = async () => {
+        if (!mounted || !pollingOnly) return;
+        const since = eventCursorRef.current;
+        const cursorQuery = since ? `?since=${encodeURIComponent(since)}&limit=100` : "?limit=100";
+        try {
+          const eventsResponse = await apiFetch(`/events${cursorQuery}`);
+          if (eventsResponse.ok) {
+            const payload = await eventsResponse.json() as {
+              items?: V1EventItem[];
+              nextCursor?: string | null;
+            };
+            const items = payload.items ?? [];
+            for (const event of items) {
+              await processEventPayload(event);
+            }
+            if (items.length > 0) {
+              eventCursorRef.current = payload.nextCursor ?? eventCursorFromItem(items[items.length - 1] as V1EventItem);
+            }
+          } else {
+            throw new Error("events poll failed");
+          }
+        } catch (error) {
+          console.error("Event polling failed:", error);
+        }
+
+        if (!mounted) return;
+        eventPollTimerRef.current = setTimeout(poll, 5000);
+      };
+
+      poll();
+    };
+
+    const startSse = async () => {
+      pollingOnly = false;
+      stopPolling();
+
+      const start = async () => {
+        while (mounted && !pollingOnly) {
+          const cursorQuery = eventCursorRef.current
+            ? `?since=${encodeURIComponent(eventCursorRef.current)}&limit=100`
+            : "?limit=100";
+          const headers = eventCursorRef.current
+            ? { "Last-Event-ID": eventCursorRef.current }
+            : undefined;
+
+          const controller = new AbortController();
+          eventStreamAbortRef.current = controller;
+          try {
+            const response = await apiFetch(`/events/stream${cursorQuery}`, {
+              headers,
+              signal: controller.signal,
+            });
+            if (!response.ok) {
+              throw new Error("events stream not available");
+            }
+
+            const reader = response.body?.getReader();
+            if (!reader) {
+              throw new Error("events stream has no body");
+            }
+
+            const decoder = new TextDecoder();
+            let buffer = "";
+
+            while (mounted && !pollingOnly && !controller.signal.aborted) {
+              const chunk = await reader.read();
+              if (chunk.done) break;
+              if (!chunk.value) continue;
+
+              const chunkText = decoder.decode(chunk.value, { stream: true });
+              buffer += chunkText;
+              const parsed = parseSSEPackets(buffer);
+              buffer = parsed.remainder;
+
+              for (const packet of parsed.packets) {
+                if (!packet.data || packet.type === "message") continue;
+                try {
+                  const eventData = JSON.parse(packet.data) as V1EventItem;
+                  eventData.id = packet.id || eventCursorFromItem(eventData);
+                  eventCursorRef.current = eventData.id;
+                  await processEventPayload(eventData);
+                } catch (parseError) {
+                  console.error("Failed to parse SSE packet:", parseError);
+                }
+              }
+            }
+          } catch (error) {
+            if (!mounted || pollingOnly) {
+              return;
+            }
+            const shouldFallback = !(
+              error instanceof DOMException && error.name === "AbortError"
+            );
+            if (shouldFallback) {
+              startPolling();
+              return;
+            }
+          } finally {
+            if (eventStreamAbortRef.current === controller) {
+              eventStreamAbortRef.current = null;
+            }
+          }
+          if (mounted && !pollingOnly) {
+            await new Promise((resolve) => {
+              setTimeout(resolve, 3000);
+            });
+          }
+        }
+      };
+
+      await start();
+    };
+
+    void startSse();
+
+    return () => {
+      mounted = false;
+      stopStream();
+      stopPolling();
+      pollingOnly = true;
+    };
+  }, [apiFetch, handleThreadEvent, isAuthenticated, processEventPayload, threadId]);
+
   const refreshIntegrationStatuses = useCallback(async () => {
     const nextStatuses: IntegrationStatusRecord = {
       notion: "disconnected",
@@ -893,14 +1573,19 @@ function ThreadRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
   }, [isAuthenticated, refreshIntegrationStatuses, searchParams, setSearchParams]);
 
   useEffect(() => {
-    if (!isAuthenticated || !handle || !projectName || !threadId) return;
+    if (!isAuthenticated || !threadId) return;
+    if (isNumericThreadRouteId(threadId) && !threadProjectId) return;
 
     setNotFound(false);
     setDetail(null);
 
-    apiFetch(
-      `/projects/${encodeURIComponent(handle)}/${encodeURIComponent(projectName)}/thread/${encodeURIComponent(threadId)}`,
-    )
+    const scopedPath = threadPathWithScope();
+    if (!scopedPath) {
+      setNotFound(true);
+      return;
+    }
+
+    apiFetch(scopedPath)
       .then(async (res) => {
         if (res.status === 404) {
           setNotFound(true);
@@ -912,7 +1597,7 @@ function ThreadRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
         setDetail(await res.json());
       })
       .catch(() => setNotFound(true));
-  }, [isAuthenticated, handle, projectName, threadId, apiFetch]);
+  }, [isAuthenticated, threadId, apiFetch, threadPathWithScope, threadProjectId]);
 
   if (notFound) {
     return (
@@ -933,12 +1618,17 @@ function ThreadRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
     return (
     <ThreadPage
       detail={detail}
+      threadRouteId={threadId}
       integrationStatuses={integrationStatuses}
       disableChatInputs={false}
       onUpdateThread={async (payload) => {
         try {
+          const scopedPath = threadPathWithScope();
+          if (!scopedPath) {
+            return { error: "Unable to determine thread context." };
+          }
           const res = await apiFetch(
-            `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/thread/${encodeURIComponent(threadId!)}`,
+            scopedPath,
             {
               method: "PATCH",
               headers: { "Content-Type": "application/json" },
@@ -950,6 +1640,7 @@ function ThreadRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
           }
           const data = (await res.json()) as { thread: ThreadDetail };
           setDetail((prev) => (prev ? { ...prev, thread: data.thread } : prev));
+          onProjectMutated?.();
           return data;
         } catch (error: unknown) {
           if (error instanceof Error && error.message.trim()) {
@@ -959,12 +1650,16 @@ function ThreadRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
         }
       }}
       onSaveTopologyLayout={async (payload) => {
+        const scopedPath = threadPathWithScope("/matrix");
+        if (!scopedPath) {
+          return { error: "Unable to determine thread context." };
+        }
         const res = await apiFetch(
-          `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/thread/${encodeURIComponent(threadId!)}/topology/layout`,
+          scopedPath,
           {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
+            body: JSON.stringify({ layout: payload.positions }),
           },
         );
         if (!res.ok) {
@@ -981,184 +1676,17 @@ function ThreadRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
         ));
         return data;
       }}
-      onAddMatrixDoc={async (payload) => {
-        const res = await apiFetch(
-          `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/thread/${encodeURIComponent(threadId!)}/matrix/refs`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          },
-        );
-        if (!res.ok) {
-          return { error: await readError(res, "Failed to add matrix document") };
-        }
-        const data = (await res.json()) as MatrixRefMutationResponse;
-        const hasSystemPromptUpdate =
-          typeof data.systemPrompt !== "undefined" || typeof data.systemPromptTitle !== "undefined" || typeof data.systemPrompts !== "undefined";
-        const nextCells = normalizeMutationCells(data);
-        setDetail((prev) => (
-          prev
-            ? {
-                ...prev,
-                systemId: data.systemId,
-                ...(hasSystemPromptUpdate ? {} : { matrix: { ...prev.matrix, cells: applyMutationCells(prev.matrix.cells, nextCells) } }),
-                ...(typeof data.systemPrompt === "undefined" ? {} : { systemPrompt: data.systemPrompt }),
-                ...(typeof data.systemPromptTitle === "undefined" ? {} : { systemPromptTitle: data.systemPromptTitle }),
-                ...(typeof data.systemPrompts === "undefined" ? {} : { systemPrompts: data.systemPrompts }),
-                chat: {
-                  ...prev.chat,
-                  messages: mergeChatMessages(prev.chat.messages, data.messages ?? []),
-                },
-              }
-            : prev
-        ));
-        return data;
-      }}
-      onRemoveMatrixDoc={async (payload) => {
-        const res = await apiFetch(
-          `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/thread/${encodeURIComponent(threadId!)}/matrix/refs`,
-          {
-            method: "DELETE",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          },
-        );
-        if (!res.ok) {
-          return { error: await readError(res, "Failed to remove matrix document") };
-        }
-        const data = (await res.json()) as MatrixRefMutationResponse;
-        const hasSystemPromptUpdate =
-          typeof data.systemPrompt !== "undefined" || typeof data.systemPromptTitle !== "undefined" || typeof data.systemPrompts !== "undefined";
-        const nextCells = normalizeMutationCells(data);
-        setDetail((prev) => (
-          prev
-            ? {
-                ...prev,
-                systemId: data.systemId,
-                ...(hasSystemPromptUpdate ? {} : { matrix: { ...prev.matrix, cells: applyMutationCells(prev.matrix.cells, nextCells) } }),
-                ...(typeof data.systemPrompt === "undefined" ? {} : { systemPrompt: data.systemPrompt }),
-                ...(typeof data.systemPromptTitle === "undefined" ? {} : { systemPromptTitle: data.systemPromptTitle }),
-                ...(typeof data.systemPrompts === "undefined" ? {} : { systemPrompts: data.systemPrompts }),
-                chat: {
-                  ...prev.chat,
-                  messages: mergeChatMessages(prev.chat.messages, data.messages ?? []),
-                },
-              }
-            : prev
-        ));
-        return data;
-      }}
-      onCreateMatrixDocument={async (payload) => {
-        const res = await apiFetch(
-          `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/thread/${encodeURIComponent(threadId!)}/matrix/documents`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          },
-        );
-        if (!res.ok) {
-          return { error: await readError(res, "Failed to create matrix document") };
-        }
-        const data = (await res.json()) as MatrixDocumentCreateResponse;
-        const hasSystemPromptUpdate =
-          typeof data.systemPrompt !== "undefined" || typeof data.systemPromptTitle !== "undefined" || typeof data.systemPrompts !== "undefined";
-        setDetail((prev) => {
-          if (!prev) return prev;
-          const isPrompt = payload.kind === "Prompt";
-          const shouldUpdateDocumentCollections = !hasSystemPromptUpdate && !isPrompt;
-          const nextCells = normalizeMutationCells(data);
-          const attachConcerns = payload.attach ? getAttachConcerns(payload.attach) : [];
-          const fallbackCells =
-            shouldUpdateDocumentCollections && nextCells.length > 0
-              ? nextCells
-              : shouldUpdateDocumentCollections && payload.attach && attachConcerns.length > 0
-                ? buildFallbackAttachedCells(
-                    prev.matrix.cells,
-                    payload.attach.nodeId,
-                    attachConcerns,
-                    payload.attach.refType,
-                    data.document,
-                  )
-                : nextCells;
-          const shouldUpdateMatrixCells = shouldUpdateDocumentCollections && !isPrompt;
-
-          return {
-            ...prev,
-            systemId: data.systemId,
-            ...(typeof data.systemPrompt === "undefined" ? {} : { systemPrompt: data.systemPrompt }),
-            ...(typeof data.systemPromptTitle === "undefined" ? {} : { systemPromptTitle: data.systemPromptTitle }),
-            ...(typeof data.systemPrompts === "undefined" ? {} : { systemPrompts: data.systemPrompts }),
-            matrix: {
-              ...prev.matrix,
-              ...(shouldUpdateDocumentCollections
-                ? { documents: upsertMatrixDocument(prev.matrix.documents, data.document) }
-                : {}),
-              ...(shouldUpdateMatrixCells
-                ? { cells: applyMutationCells(prev.matrix.cells, fallbackCells) }
-                : {}),
-            },
-            chat: {
-              ...prev.chat,
-              messages: mergeChatMessages(prev.chat.messages, data.messages ?? []),
-            },
-          };
-        });
-        return data;
-      }}
-      onReplaceMatrixDocument={async (documentHash, payload) => {
-        const res = await apiFetch(
-          `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/thread/${encodeURIComponent(threadId!)}/matrix/documents/${encodeURIComponent(documentHash)}`,
-          {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          },
-        );
-        if (!res.ok) {
-          return { error: await readError(res, "Failed to replace matrix document") };
-        }
-        const data = (await res.json()) as MatrixDocumentReplaceResponse;
-        const hasSystemPromptUpdate =
-          typeof data.systemPrompt !== "undefined" || typeof data.systemPromptTitle !== "undefined" || typeof data.systemPrompts !== "undefined";
-        setDetail((prev) => {
-          if (!prev) return prev;
-          const shouldUpdateDocumentCollections = !hasSystemPromptUpdate;
-          return {
-            ...prev,
-            systemId: data.systemId,
-            ...(typeof data.systemPrompt === "undefined" ? {} : { systemPrompt: data.systemPrompt }),
-            ...(typeof data.systemPromptTitle === "undefined" ? {} : { systemPromptTitle: data.systemPromptTitle }),
-            ...(typeof data.systemPrompts === "undefined" ? {} : { systemPrompts: data.systemPrompts }),
-            matrix: {
-              ...prev.matrix,
-              ...(shouldUpdateDocumentCollections
-                ? {
-                    documents: replaceMatrixDocumentInGlobalList(
-                      prev.matrix.documents,
-                      data.oldHash,
-                      data.document,
-                    ),
-                    cells: replaceMatrixDocumentReferences(
-                      prev.matrix.cells,
-                      data.oldHash,
-                      data.document,
-                    ),
-                  }
-                : {}),
-            },
-            chat: {
-              ...prev.chat,
-              messages: mergeChatMessages(prev.chat.messages, data.messages ?? []),
-            },
-          };
-        });
-        return data;
-      }}
+      onAddMatrixDoc={undefined}
+      onRemoveMatrixDoc={undefined}
+      onCreateMatrixDocument={undefined}
+      onReplaceMatrixDocument={undefined}
       onSendChatMessage={async (payload) => {
+        const scopedPath = threadPathWithScope("/chat");
+        if (!scopedPath) {
+          return { error: "Unable to determine thread context." };
+        }
         const res = await apiFetch(
-          `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/thread/${encodeURIComponent(threadId!)}/chat/messages`,
+          scopedPath,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1184,6 +1712,7 @@ function ThreadRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
         return data;
       }}
       onRunAssistant={async (payload) => {
+        const assistantType = payload.mode === "plan" ? "plan" : "direct";
         const requestPayload = {
           ...payload,
           executor: payload.mode === "direct" ? "desktop" : payload.executor ?? "backend",
@@ -1191,8 +1720,7 @@ function ThreadRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
         };
         const resolveRunResult = async (runId: string) => {
           const runRes = await apiFetch(
-            `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/thread/${encodeURIComponent(threadId!)}/assistant/run/${encodeURIComponent(runId)}`,
-            { method: "GET" },
+            `/assistant-runs/${encodeURIComponent(runId)}`,
           );
           if (!runRes.ok) {
             return null;
@@ -1200,8 +1728,12 @@ function ThreadRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
           return (await runRes.json()) as AssistantRunResultResponse;
         };
 
+        const scopedRunPath = threadPathWithScope(`/assistants/${assistantType}/runs`);
+        if (!scopedRunPath) {
+          return { error: "Unable to determine thread context." };
+        }
         const res = await apiFetch(
-          `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/thread/${encodeURIComponent(threadId!)}/assistant/run`,
+          scopedRunPath,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1227,8 +1759,10 @@ function ThreadRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
           }>;
         };
         const refreshThread = async () => {
+          const scopedPath = threadPathWithScope();
+          if (!scopedPath) return null;
           const threadRes = await apiFetch(
-            `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/thread/${encodeURIComponent(threadId!)}`,
+            scopedPath,
           );
           if (!threadRes.ok) {
             return null;
@@ -1241,10 +1775,12 @@ function ThreadRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
           && (runStartResponse.status === "queued" || runStartResponse.status === "running")
           && typeof runStartResponse.runId === "string"
         ) {
+          const targetProjectId = await resolveThreadProjectId();
           const localRun = await window.electronAPI.assistant?.run?.({
             handle: handle ?? "",
             projectName: projectName ?? "",
             threadId: threadId ?? "",
+            projectId: targetProjectId ?? undefined,
             runId: runStartResponse.runId,
           });
           if (localRun) {
@@ -1329,9 +1865,11 @@ function ThreadRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
           && typeof finalResult.changesCount === "number"
           && finalResult.changesCount > 0
         ) {
-          const threadRes = await apiFetch(
-            `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/thread/${encodeURIComponent(threadId!)}`,
-          );
+          const scopedPath = threadPathWithScope();
+          if (!scopedPath) {
+            return { error: "Unable to determine thread context." };
+          }
+          const threadRes = await apiFetch(scopedPath);
           if (threadRes.ok) {
             finalThreadState = await threadRes.json() as ThreadDetailPayload;
           }
@@ -1353,9 +1891,17 @@ function ThreadRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
       }}
       onCloseThread={async () => {
         try {
+          const scopedPath = threadPathWithScope();
+          if (!scopedPath) {
+            return { error: "Unable to determine thread context." };
+          }
           const res = await apiFetch(
-            `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/thread/${encodeURIComponent(threadId!)}/close`,
-            { method: "POST" },
+            scopedPath,
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ status: "closed" }),
+            },
           );
           if (!res.ok) {
             return { error: await readError(res, "Failed to close thread") };
@@ -1372,9 +1918,17 @@ function ThreadRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
       }}
       onCommitThread={async () => {
         try {
+          const scopedPath = threadPathWithScope();
+          if (!scopedPath) {
+            return { error: "Unable to determine thread context." };
+          }
           const res = await apiFetch(
-            `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/thread/${encodeURIComponent(threadId!)}/commit`,
-            { method: "POST" },
+            scopedPath,
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ status: "committed" }),
+            },
           );
           if (!res.ok) {
             return { error: await readError(res, "Failed to commit thread") };
@@ -1393,20 +1947,82 @@ function ThreadRoute({ isAuthenticated }: { isAuthenticated: boolean }) {
   );
 }
 
-function ProjectHeader() {
+function AppShell({
+  projects,
+  setProjects,
+  isAuthenticated,
+  refreshProjects,
+}: {
+  projects: Project[];
+  setProjects: React.Dispatch<React.SetStateAction<Project[]>>;
+  isAuthenticated: boolean;
+  refreshProjects: () => void;
+}) {
+  const navigate = useNavigate();
   const location = useLocation();
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    try {
+      return localStorage.getItem("acx-sidebar") !== "false";
+    } catch {
+      return true;
+    }
+  });
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarOpen((prev) => {
+      const next = !prev;
+      try { localStorage.setItem("acx-sidebar", String(next)); } catch {}
+      return next;
+    });
+  }, []);
+
   const segments = location.pathname.replace(/^\//, "").split("/").filter(Boolean);
-  const isProjectRoute =
-    segments.length >= 2 && segments[0] !== "settings";
+  const isProjectRoute = segments.length >= 2 && segments[0] !== "settings";
   const handle = isProjectRoute ? segments[0] : undefined;
   const projectName = isProjectRoute ? segments[1] : undefined;
 
+  useEffect(() => {
+    if (!isAuthenticated && location.pathname !== "/") {
+      navigate("/", { replace: true });
+    }
+  }, [isAuthenticated, location.pathname, navigate]);
+
   return (
-    <Header
-      variant="desktop"
-      projectLabel={handle && projectName ? `${handle} / ${projectName}` : undefined}
-      projectHref={handle && projectName ? `/${handle}/${projectName}` : undefined}
-    />
+    <>
+      <NavigateSync />
+      <Header
+        variant="desktop"
+        projectLabel={handle && projectName ? `${handle} / ${projectName}` : undefined}
+        projectHref={handle && projectName ? `/${handle}/${projectName}` : undefined}
+        onToggleSidebar={toggleSidebar}
+      />
+      <div className="app-layout">
+        {isAuthenticated && (
+          <Sidebar
+            projects={projects}
+            activeProjectOwner={handle}
+            activeProjectName={projectName}
+            open={sidebarOpen}
+          />
+        )}
+        <div className="app-content">
+          <Routes>
+            <Route path="/" element={<HomeRoute projects={projects} setProjects={setProjects} />} />
+            <Route path="/:handle/:project" element={<ProjectRoute isAuthenticated={isAuthenticated} onProjectMutated={refreshProjects} />} />
+            <Route path="/settings" element={<AccountSettingsRoute isAuthenticated={isAuthenticated} />} />
+            <Route
+              path="/:handle/:project/settings"
+              element={<SettingsRoute isAuthenticated={isAuthenticated} onProjectMutated={refreshProjects} />}
+            />
+            <Route path="/:handle" element={<ProfileRoute isAuthenticated={isAuthenticated} />} />
+            <Route
+              path="/:handle/:project/thread/:threadId"
+              element={<ThreadRoute isAuthenticated={isAuthenticated} onProjectMutated={refreshProjects} />}
+            />
+          </Routes>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -1415,6 +2031,9 @@ export function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsKey, setProjectsKey] = useState(0);
+
+  const refreshProjects = useCallback(() => setProjectsKey((k) => k + 1), []);
 
   useEffect(() => {
     const { auth } = window.electronAPI;
@@ -1458,13 +2077,14 @@ export function App() {
         }
 
         if (projRes.ok) {
-          setProjects(await projRes.json());
+          const projectsData = (await projRes.json()) as V1ProjectListResponse;
+          setProjects(toEnvelopePayload(projectsData).items.map((project) => normalizeProject(project)));
         }
       } catch (err) {
         console.error("API fetch failed:", err);
       }
     });
-  }, [isAuthenticated]);
+  }, [isAuthenticated, projectsKey]);
 
   return (
     <AuthContext.Provider
@@ -1476,19 +2096,7 @@ export function App() {
         logout: () => window.electronAPI.auth.logout(),
       }}
     >
-      <NavigateSync />
-      <ProjectHeader />
-      <Routes>
-        <Route path="/" element={<HomeRoute projects={projects} setProjects={setProjects} />} />
-        <Route path="/:handle/:project" element={<ProjectRoute isAuthenticated={isAuthenticated} />} />
-        <Route path="/settings" element={<AccountSettingsRoute isAuthenticated={isAuthenticated} />} />
-        <Route path="/:handle/:project/settings" element={<SettingsRoute isAuthenticated={isAuthenticated} />} />
-        <Route path="/:handle" element={<ProfileRoute isAuthenticated={isAuthenticated} />} />
-        <Route
-          path="/:handle/:project/thread/:threadId"
-          element={<ThreadRoute isAuthenticated={isAuthenticated} />}
-        />
-      </Routes>
+      <AppShell projects={projects} setProjects={setProjects} isAuthenticated={isAuthenticated} refreshProjects={refreshProjects} />
     </AuthContext.Provider>
   );
 }

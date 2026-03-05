@@ -5,7 +5,13 @@ import { net } from "electron";
 
 const AUTH0_DOMAIN = import.meta.env.VITE_AUTH0_DOMAIN ?? "";
 const AUTH0_CLIENT_ID = import.meta.env.VITE_AUTH0_CLIENT_ID ?? "";
-const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
+function normalizeApiUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  if (!trimmed) return "http://localhost:3001/v1";
+  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+}
+
+const API_URL = normalizeApiUrl(import.meta.env.VITE_API_URL ?? "http://localhost:3001");
 const CALLBACK_PORT = 17823;
 const REDIRECT_URI = `http://127.0.0.1:${CALLBACK_PORT}`;
 

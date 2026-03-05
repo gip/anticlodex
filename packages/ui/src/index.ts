@@ -25,5 +25,6 @@ export {
 } from "./thread-page";
 export { UserProfilePage, type UserProfile, type UserProfileProject } from "./user-profile";
 export { ProjectSettingsPage, type Collaborator, type SearchResult, type Concern } from "./project-settings";
+export { Sidebar } from "./sidebar";
 export { Link, setNavigate } from "./link";
 export { Logo } from "./logo";

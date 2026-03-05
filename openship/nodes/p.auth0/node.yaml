@@ -1,0 +1,31 @@
+"id": "p.auth0"
+"kind": "Process"
+"name": "Auth0 Identity Process"
+"parentId": "h.auth0"
+"metadata":
+  "openshipKey": "auth0"
+  "ownership": "third_party"
+  "boundary": "external"
+  "runtime": "oidc-provider"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:b225b034c4170d1e4555666b5bb79df5f8fd68e3559b1c6101de7a245d8719c6"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:d7563049cb764f90ae824a5fc12e0c144f306d610683fd18b60ed576be8f84c7"
+    "skillRefs": []
+  "Interfaces":
+    "documentRefs":
+      - "sha256:f200ca780fdd3eaa75575d25d65aa423a7c39d3fba592e28d8f4f41e13bac626"
+    "skillRefs": []
+  "Security":
+    "documentRefs":
+      - "sha256:2dda5749ab774da1032325ddb664fd1d168fa72b47d2712f27d55e44070475c6"
+    "skillRefs": []
+"artifacts":
+  "Summary":
+    - "a.p.auth0.features.summary.v1"
+  "Docs":
+    - "a.p.auth0.specs.docs.v1"

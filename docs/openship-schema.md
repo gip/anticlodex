@@ -1,6 +1,8 @@
 # OpenShip Domain Model
 
-Reference for the OpenShip schema. Source of truth: `apps/api/src/migrations/001_init.sql`.
+Reference for the OpenShip schema. Source of truth: `apps/api/db/migrations/0001_init_full_schema.sql`.
+
+This repository now uses a single full-schema migration as the bootstrap point for the v1 API migration story.
 
 ## Core Concepts
 
@@ -26,6 +28,12 @@ A component in the architecture graph. Nodes form a **tree** (via `parent_id`, s
 
 - Table: `nodes` — composite PK `(system_id, id)`
 - Parent FK is `deferrable initially deferred` so insert order doesn't matter
+- Required metadata contract in this repository:
+  - `metadata.ownership`: `first_party` or `third_party`
+  - `metadata.boundary`: `internal` or `external`
+- Host naming convention:
+  - `first_party` host names start with `First-Party Host`
+  - `third_party` host names start with `Third-Party Service Host` or `External Service Host`
 
 ### Edge
 

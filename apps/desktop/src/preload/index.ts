@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       handle: string;
       projectName: string;
       threadId: string;
+      projectId?: string;
       runId: string;
     }) => ipcRenderer.invoke("assistant:run", payload) as Promise<unknown>,
   },

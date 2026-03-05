@@ -1,0 +1,23 @@
+"id": "h.notion-platform"
+"kind": "Host"
+"name": "Notion Platform"
+"parentId": "s.root"
+"metadata":
+  "openshipKey": "notion-platform"
+  "ownership": "third_party"
+  "boundary": "external"
+  "platform": "notion-cloud-apis"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:58c8e0ab9320d24de9880fb5b0ae1253537063b04cea378bfb735ac752691428"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:514c56d7eeb6dc6db2e315e395a39278a5678b5d618cd5a0fa67e78407d9438c"
+    "skillRefs": []
+"artifacts":
+  "Summary":
+    - "a.h.notion-platform.features.summary.v1"
+  "Docs":
+    - "a.h.notion-platform.specs.docs.v1"

@@ -1,18 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   ChevronDown,
   ChevronRight,
   ExternalLink,
+  CheckCircle2,
+  LayoutGrid,
   Minimize2,
   Pencil,
   Plus,
   Send,
   X,
 } from "lucide-react";
-import { Marked } from "marked";
+import ELK, { type ElkExtendedEdge, type ElkNode } from "elkjs/lib/elk.bundled.js";
 import ReactFlow, {
   Background,
+  ControlButton,
   Controls,
   Handle,
   MarkerType,
@@ -29,6 +32,7 @@ import "reactflow/dist/style.css";
 import { Link } from "./link";
 import { useAuth } from "./auth-context";
 import { isFinalizedThreadStatus, type ThreadStatus } from "./home";
+import { renderMarkdown } from "./markdown";
 
 type DocKind = "Document" | "Skill";
 type MessageRole = "User" | "Assistant" | "System";
@@ -50,6 +54,8 @@ export interface TopologyNode {
   parentId: string | null;
   layoutX?: number | null;
   layoutY?: number | null;
+  ownership: "first_party" | "third_party";
+  boundary: "internal" | "external";
 }
 
 export interface TopologyEdge {
@@ -58,6 +64,7 @@ export interface TopologyEdge {
   fromNodeId: string;
   toNodeId: string;
   protocol?: string | null;
+  layer7?: string | null;
 }
 
 export interface MatrixCellDoc {
@@ -113,6 +120,7 @@ export interface ChatMessage {
   actionPosition?: number;
   role: MessageRole;
   content: string;
+  senderName?: string;
   createdAt: string;
 }
 
@@ -120,39 +128,116 @@ export type AssistantRunMode = "direct" | "plan";
 
 export type AssistantExecutor = "backend" | "desktop";
 
+type AssistantModel = "claude-opus-4-6" | "claude-sonnet-4-6" | "codex-5.3";
+
+interface AssistantModelOption {
+  key: AssistantModel;
+  label: string;
+}
+
+const ASSISTANT_MODELS: AssistantModelOption[] = [
+  { key: "claude-opus-4-6", label: "Opus 4.6" },
+  { key: "claude-sonnet-4-6", label: "Sonnet 4.6" },
+  { key: "codex-5.3", label: "Codex 5.3" },
+];
+
+const DEFAULT_ASSISTANT_MODEL: AssistantModel = "claude-opus-4-6";
+const MODEL_STORAGE_KEY_PREFIX = "acx-thread-agent-model";
+const MODEL_STORAGE_KEY_GLOBAL = "acx-thread-agent-model-default";
+const TOPOLOGY_ELK = new ELK();
+const TOPOLOGY_ELK_LAYOUT_OPTIONS = {
+  "elk.algorithm": "layered",
+  "elk.direction": "RIGHT",
+  "elk.layered.spacing.nodeNodeBetweenLayers": "120",
+  "elk.spacing.nodeNode": "80",
+  "elk.spacing.edgeNode": "40",
+} as const;
+
+function resolveAssistantModel(raw: string | null | undefined): AssistantModel {
+  const normalized = raw?.trim() ?? "";
+  return ASSISTANT_MODELS.some((model) => model.key === normalized) ? (normalized as AssistantModel) : DEFAULT_ASSISTANT_MODEL;
+}
+
+function threadModelStorageKey(threadId: string): string {
+  return `${MODEL_STORAGE_KEY_PREFIX}:${threadId}`;
+}
+
+function readStoredAssistantModel(threadId: string): AssistantModel {
+  try {
+    const threadScoped = localStorage.getItem(threadModelStorageKey(threadId));
+    const fallback = localStorage.getItem(MODEL_STORAGE_KEY_GLOBAL);
+    return resolveAssistantModel(threadScoped || fallback);
+  } catch {
+    return DEFAULT_ASSISTANT_MODEL;
+  }
+}
+
 export interface AssistantRunRequest {
   chatMessageId: string | null;
   mode: AssistantRunMode;
   planActionId: string | null;
   executor?: AssistantExecutor;
   wait?: boolean;
+  model?: string;
 }
 
 export interface AssistantRunResponse {
-  planActionId: string | null;
-  planResponseActionId: string | null;
-  executeActionId: string | null;
-  executeResponseActionId: string | null;
-  updateActionId: string | null;
-  filesChanged: {
+  runId?: string;
+  status?: "queued" | "running" | "success" | "failed" | "cancelled";
+  mode?: AssistantRunMode;
+  threadId?: string;
+  systemId?: string;
+  planActionId?: string | null;
+  planResponseActionId?: string | null;
+  executeActionId?: string | null;
+  executeResponseActionId?: string | null;
+  updateActionId?: string | null;
+  filesChanged?: {
     kind: "Create" | "Update" | "Delete";
     path: string;
     fromHash?: string;
     toHash?: string;
   }[];
-  summary: {
-    status: "success" | "failed";
+  summary?: {
+    status: "success" | "failed" | "cancelled" | "queued" | "running";
     messages: string[];
   };
-  changesCount: number;
-  messages: ChatMessage[];
-  systemId: string;
+  runResultStatus?: "success" | "failed" | null;
+  runResultMessages?: string[];
+  runResultChanges?: unknown[];
+  runError?: string | null;
+  changesCount?: number;
+  messages?: ChatMessage[];
   threadState?: ThreadDetailPayload;
+}
+
+type AssistantRunSummaryStatus = "success" | "failed" | "cancelled" | "queued" | "running";
+
+function getRunSummary(response: AssistantRunResponse): { status: AssistantRunSummaryStatus; messages: string[] } {
+  if (response.summary?.status) {
+    return {
+      status: response.summary.status,
+      messages: response.summary.messages,
+    };
+  }
+
+  const fromStatus = response.status ?? "queued";
+  const mappedStatus: AssistantRunSummaryStatus = (() => {
+    if (fromStatus === "cancelled") return "cancelled";
+    if (fromStatus === "failed") return "failed";
+    if (fromStatus === "success") return "success";
+    if (fromStatus === "running") return "running";
+    return "queued";
+  })();
+
+  return {
+    status: response.runResultStatus === "failed" ? "failed" : mappedStatus,
+    messages: response.runResultMessages ?? [],
+  };
 }
 
 export interface ThreadDetail {
   id: string;
-  projectThreadId: number;
   title: string;
   description: string | null;
   status: ThreadStatus;
@@ -272,6 +357,7 @@ interface MatrixDocumentModal {
 
 interface ThreadPageProps {
   detail: ThreadDetailPayload;
+  threadRouteId?: string;
   onUpdateThread?: (payload: { title?: string; description?: string | null }) => Promise<MutationResult<{ thread: ThreadDetail }>>;
   onSaveTopologyLayout?: (payload: { positions: Array<{ nodeId: string; x: number; y: number }> }) => Promise<MutationResult<{ systemId: string }>>;
   onAddMatrixDoc?: (
@@ -292,7 +378,6 @@ interface ThreadPageProps {
   disableChatInputs?: boolean;
 }
 
-const AGENT_OPTIONS = ["Opus 4.6"] as const;
 const SYSTEM_PROMPT_CONCERN = "__system_prompt__";
 const DOC_TYPES: DocKind[] = ["Document", "Skill"];
 const SOURCE_TYPE_TO_PROVIDER: Record<Exclude<DocSourceType, "local">, IntegrationProvider> = {
@@ -371,15 +456,6 @@ function formatDateTime(value: string) {
   });
 }
 
-const markedInstance = new Marked({
-  breaks: true,
-  gfm: true,
-});
-
-function renderMarkdown(source: string): string {
-  return markedInstance.parse(source) as string;
-}
-
 function timeAgo(value: string) {
   const seconds = Math.floor((Date.now() - new Date(value).getTime()) / 1000);
   if (seconds < 60) return "just now";
@@ -436,8 +512,96 @@ function sortNodes(a: TopologyNode, b: TopologyNode) {
   return a.id.localeCompare(b.id);
 }
 
+function sortMatrixTopLevelNodes(a: TopologyNode, b: TopologyNode) {
+  const priority = (node: TopologyNode) => {
+    if (node.kind === "Library") return 0;
+    if (node.kind === "Host") return 1;
+    return 2;
+  };
+  const byPriority = priority(a) - priority(b);
+  if (byPriority !== 0) return byPriority;
+  return sortNodes(a, b);
+}
+
+type TopologyOwnership = TopologyNode["ownership"];
+type TopologyBoundary = TopologyNode["boundary"];
+
+function normalizeTopologyOwnership(value: unknown): "first_party" | "third_party" | null {
+  if (value === "first_party" || value === "third_party") return value;
+  return null;
+}
+
+function normalizeTopologyBoundary(value: unknown): "internal" | "external" | null {
+  if (value === "internal" || value === "external") return value;
+  return null;
+}
+
+function matchesTopologyFilters(
+  node: TopologyNode,
+  visibleOwnerships: Set<TopologyOwnership>,
+  visibleBoundaries: Set<TopologyBoundary>,
+): boolean {
+  const ownership = normalizeTopologyOwnership(node.ownership);
+  const boundary = normalizeTopologyBoundary(node.boundary);
+  const ownershipVisible = ownership !== null && visibleOwnerships.has(ownership);
+  const boundaryVisible = boundary !== null && visibleBoundaries.has(boundary);
+  return ownershipVisible && boundaryVisible;
+}
+
+function computeVisibleTopologyNodeIds(
+  nodes: TopologyNode[],
+  visibleOwnerships: Set<TopologyOwnership>,
+  visibleBoundaries: Set<TopologyBoundary>,
+): Set<string> {
+  const childrenByParent = new Map<string, TopologyNode[]>();
+  for (const node of nodes) {
+    if (!node.parentId) continue;
+    const list = childrenByParent.get(node.parentId) ?? [];
+    list.push(node);
+    childrenByParent.set(node.parentId, list);
+  }
+
+  const directMatches = new Map<string, boolean>();
+  for (const node of nodes) {
+    directMatches.set(node.id, matchesTopologyFilters(node, visibleOwnerships, visibleBoundaries));
+  }
+
+  const cache = new Map<string, boolean>();
+  const inProgress = new Set<string>();
+
+  const subtreeMatches = (nodeId: string): boolean => {
+    const cached = cache.get(nodeId);
+    if (typeof cached === "boolean") return cached;
+    if (inProgress.has(nodeId)) {
+      return directMatches.get(nodeId) ?? false;
+    }
+    inProgress.add(nodeId);
+
+    let visible = directMatches.get(nodeId) ?? false;
+    if (!visible) {
+      for (const child of childrenByParent.get(nodeId) ?? []) {
+        if (!subtreeMatches(child.id)) continue;
+        visible = true;
+        break;
+      }
+    }
+
+    inProgress.delete(nodeId);
+    cache.set(nodeId, visible);
+    return visible;
+  };
+
+  const includedNodeIds = new Set<string>();
+  for (const node of nodes) {
+    if (!subtreeMatches(node.id)) continue;
+    includedNodeIds.add(node.id);
+  }
+  return includedNodeIds;
+}
+
 interface FlowLayoutModel {
   byId: Map<string, TopologyNode>;
+  includedNodeIds: Set<string>;
   visibleNodes: TopologyNode[];
   hiddenNodeIds: Set<string>;
   visibleParentById: Map<string, string | null>;
@@ -468,6 +632,16 @@ interface TopologyFlowNodeData {
 interface FlowEndpoint {
   nodeId: string;
   handleId: string;
+}
+
+interface AppliedElkLayout {
+  nodes: Node[];
+  positions: Array<{ nodeId: string; x: number; y: number }>;
+}
+
+interface AutoLayoutRunOptions {
+  sourceNodes?: Node[];
+  persist?: boolean;
 }
 
 function FullscreenIcon({ size = 16 }: { size?: number }) {
@@ -855,16 +1029,21 @@ const FLOW_NODE_TYPES = {
   rootGroup: RootGroupNode,
 };
 
-function buildFlowLayoutModel(nodes: TopologyNode[]): FlowLayoutModel {
+function buildFlowLayoutModel(
+  nodes: TopologyNode[],
+  visibleOwnerships: Set<TopologyOwnership>,
+  visibleBoundaries: Set<TopologyBoundary>,
+): FlowLayoutModel {
   const byId = new Map(nodes.map((node) => [node.id, node]));
+  const includedNodeIds = computeVisibleTopologyNodeIds(nodes, visibleOwnerships, visibleBoundaries);
   const hiddenNodeIds = new Set<string>();
   const nestedChildrenByHost = new Map<string, TopologyNode[]>();
-  const nestedKinds = new Set(["Container", "Process", "Library"]);
+  const nestedKinds = new Set(["Container", "Process"]);
 
   // Extract Root node — rendered as a background boundary, not a regular card
   let rootNode: TopologyNode | null = null;
   for (const node of nodes) {
-    if (node.kind === "Root") {
+    if (node.kind === "Root" && includedNodeIds.has(node.id)) {
       rootNode = node;
       hiddenNodeIds.add(node.id);
       break;
@@ -873,8 +1052,10 @@ function buildFlowLayoutModel(nodes: TopologyNode[]): FlowLayoutModel {
 
   for (const node of nodes) {
     if (!node.parentId) continue;
+    if (!includedNodeIds.has(node.id)) continue;
     const parent = byId.get(node.parentId);
     if (!parent || parent.kind !== "Host") continue;
+    if (!includedNodeIds.has(parent.id)) continue;
     if (!nestedKinds.has(node.kind)) continue;
     hiddenNodeIds.add(node.id);
     const nested = nestedChildrenByHost.get(parent.id) ?? [];
@@ -886,12 +1067,24 @@ function buildFlowLayoutModel(nodes: TopologyNode[]): FlowLayoutModel {
     nested.sort(sortNodes);
   }
 
-  const visibleNodes = nodes.filter((node) => !hiddenNodeIds.has(node.id));
+  const visibleNodes = nodes.filter((node) => includedNodeIds.has(node.id) && !hiddenNodeIds.has(node.id));
   const visibleParentById = new Map<string, string | null>();
   for (const node of visibleNodes) {
     let parentId = node.parentId;
-    while (parentId && hiddenNodeIds.has(parentId)) {
-      parentId = byId.get(parentId)?.parentId ?? null;
+    if (node.kind === "Library") {
+      parentId = null;
+    }
+    while (parentId) {
+      const parent = byId.get(parentId);
+      if (!parent) {
+        parentId = null;
+        break;
+      }
+      if (hiddenNodeIds.has(parentId) || !includedNodeIds.has(parentId)) {
+        parentId = parent.parentId ?? null;
+        continue;
+      }
+      break;
     }
     if (parentId && !byId.has(parentId)) {
       parentId = null;
@@ -901,6 +1094,7 @@ function buildFlowLayoutModel(nodes: TopologyNode[]): FlowLayoutModel {
 
   return {
     byId,
+    includedNodeIds,
     visibleNodes,
     hiddenNodeIds,
     visibleParentById,
@@ -1049,6 +1243,98 @@ const ROOT_GROUP_PADDING_BOTTOM = 80;
 const ESTIMATED_NODE_WIDTH = 240;
 const ESTIMATED_NODE_HEIGHT = 120;
 
+function resolveFlowNodeWidth(node: Node | undefined): number {
+  const width =
+    (typeof node?.width === "number" && Number.isFinite(node.width) ? node.width : null)
+    ?? (typeof node?.style?.width === "number" && Number.isFinite(node.style.width) ? node.style.width : null)
+    ?? (typeof node?.style?.minWidth === "number" && Number.isFinite(node.style.minWidth) ? node.style.minWidth : null);
+  return width ?? ESTIMATED_NODE_WIDTH;
+}
+
+function resolveFlowNodeHeight(node: Node | undefined): number {
+  const height =
+    (typeof node?.height === "number" && Number.isFinite(node.height) ? node.height : null)
+    ?? (typeof node?.style?.height === "number" && Number.isFinite(node.style.height) ? node.style.height : null)
+    ?? (typeof node?.style?.minHeight === "number" && Number.isFinite(node.style.minHeight) ? node.style.minHeight : null);
+  return height ?? ESTIMATED_NODE_HEIGHT;
+}
+
+function buildElkGraph(flowNodes: Node[], topologyEdges: TopologyEdge[], model: FlowLayoutModel): ElkNode {
+  const visibleNodeIds = new Set(model.visibleNodes.map((node) => node.id));
+  const flowNodeById = new Map(
+    flowNodes
+      .filter((node) => node.id !== ROOT_GROUP_ID)
+      .map((node) => [node.id, node]),
+  );
+
+  const children: ElkNode[] = model.visibleNodes.map((node) => {
+    const flowNode = flowNodeById.get(node.id);
+    return {
+      id: node.id,
+      width: resolveFlowNodeWidth(flowNode),
+      height: resolveFlowNodeHeight(flowNode),
+    };
+  });
+
+  const dedupedEdges = new Set<string>();
+  const edges: ElkExtendedEdge[] = [];
+
+  for (const edge of topologyEdges) {
+    const source = resolveFlowEndpoint(edge.fromNodeId, "source", model);
+    const target = resolveFlowEndpoint(edge.toNodeId, "target", model);
+    if (!source || !target) continue;
+    if (!visibleNodeIds.has(source.nodeId) || !visibleNodeIds.has(target.nodeId)) continue;
+
+    const edgeKey = `${source.nodeId}->${target.nodeId}`;
+    if (dedupedEdges.has(edgeKey)) continue;
+    dedupedEdges.add(edgeKey);
+
+    edges.push({
+      id: `elk-edge-${edges.length}`,
+      sources: [source.nodeId],
+      targets: [target.nodeId],
+    });
+  }
+
+  return {
+    id: "topology-root",
+    layoutOptions: TOPOLOGY_ELK_LAYOUT_OPTIONS,
+    children,
+    edges,
+  };
+}
+
+function applyElkPositionsToFlowNodes(layout: ElkNode, flowNodes: Node[]): AppliedElkLayout {
+  const byNodeId = new Map<string, { x: number; y: number }>();
+  for (const child of layout.children ?? []) {
+    if (typeof child.id !== "string" || child.id.trim().length === 0) continue;
+    if (typeof child.x !== "number" || !Number.isFinite(child.x)) continue;
+    if (typeof child.y !== "number" || !Number.isFinite(child.y)) continue;
+    byNodeId.set(child.id, { x: child.x, y: child.y });
+  }
+
+  const nodes = flowNodes.map((node) => {
+    if (node.id === ROOT_GROUP_ID) return node;
+    const position = byNodeId.get(node.id);
+    if (!position) return node;
+    return {
+      ...node,
+      position: { x: position.x, y: position.y },
+    };
+  });
+
+  const positions = flowNodes
+    .filter((node) => node.id !== ROOT_GROUP_ID)
+    .map((node) => {
+      const position = byNodeId.get(node.id);
+      if (!position) return null;
+      return { nodeId: node.id, x: position.x, y: position.y };
+    })
+    .filter((entry): entry is { nodeId: string; x: number; y: number } => entry !== null);
+
+  return { nodes, positions };
+}
+
 function buildRootGroupNode(
   childNodes: Node[],
   rootNode: TopologyNode,
@@ -1147,6 +1433,7 @@ function resolveFlowEndpoint(
 ): FlowEndpoint | null {
   const endpoint = model.byId.get(nodeId);
   if (!endpoint) return null;
+  if (!model.includedNodeIds.has(nodeId)) return null;
 
   if (!model.hiddenNodeIds.has(nodeId)) {
     return {
@@ -1159,7 +1446,7 @@ function resolveFlowEndpoint(
   while (parentId) {
     const parentNode = model.byId.get(parentId);
     if (!parentNode) break;
-    if (!model.hiddenNodeIds.has(parentNode.id)) {
+    if (!model.hiddenNodeIds.has(parentNode.id) && model.includedNodeIds.has(parentNode.id)) {
       return {
         nodeId: parentNode.id,
         handleId: direction === "source" ? `child-out:${endpoint.id}` : `child-in:${endpoint.id}`,
@@ -1171,12 +1458,36 @@ function resolveFlowEndpoint(
   return null;
 }
 
-function buildFlowEdges(edges: TopologyEdge[], model: FlowLayoutModel): Edge[] {
+function buildFlowEdges(
+  edges: TopologyEdge[],
+  model: FlowLayoutModel,
+  showNetworkEdges: boolean,
+  showDependencyEdges: boolean,
+): Edge[] {
   const flowEdges: Edge[] = [];
+  const visibleNodeIds = new Set(model.visibleNodes.map((node) => node.id));
   for (const edge of edges) {
+    const isDependencyEdge = edge.type === "Dependency";
+    const isNetworkEdge = edge.type === "Runtime" || edge.type === "Dataflow";
+    if (isDependencyEdge && !showDependencyEdges) continue;
+    if (isNetworkEdge && !showNetworkEdges) continue;
+
     const source = resolveFlowEndpoint(edge.fromNodeId, "source", model);
     const target = resolveFlowEndpoint(edge.toNodeId, "target", model);
     if (!source || !target) continue;
+    if (!visibleNodeIds.has(source.nodeId) || !visibleNodeIds.has(target.nodeId)) continue;
+    const layer7 = edge.layer7?.trim();
+    const protocol = edge.protocol?.trim();
+    const dependencyLabel = edge.type === "Dependency" ? "library" : edge.type;
+    const label = layer7
+      ? protocol
+        ? `${layer7}\n${protocol}`
+        : layer7
+      : protocol || dependencyLabel;
+    const edgeClassName = `thread-topology-edge ${isDependencyEdge ? "thread-topology-edge--dependency" : isNetworkEdge ? "thread-topology-edge--network" : ""}`.trim();
+    const stroke = isDependencyEdge ? "var(--fg)" : "var(--fg-muted)";
+    const labelFill = "var(--fg-muted)";
+    const strokeDasharray = isDependencyEdge ? "6 4" : undefined;
 
     flowEdges.push({
       id: edge.id,
@@ -1184,18 +1495,36 @@ function buildFlowEdges(edges: TopologyEdge[], model: FlowLayoutModel): Edge[] {
       sourceHandle: source.handleId,
       target: target.nodeId,
       targetHandle: target.handleId,
+      className: edgeClassName,
       markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
-      style: { stroke: "var(--fg-muted)", strokeWidth: 1.2 },
-      label: edge.protocol?.trim() || edge.type,
-      labelStyle: { fill: "var(--fg-muted)", fontSize: 11 },
+      style: {
+        stroke,
+        strokeWidth: 1.2,
+        strokeDasharray,
+      },
+      label,
+      labelStyle: { fill: labelFill, fontSize: 11, whiteSpace: "pre-line" },
       zIndex: 1000,
     });
   }
   return flowEdges;
 }
 
+function buildTopologyStructureSignature(nodes: TopologyNode[], edges: TopologyEdge[]): string {
+  const nodeSignature = nodes
+    .map((node) => `${node.id}|${node.parentId ?? ""}|${node.kind}`)
+    .sort()
+    .join(";");
+  const edgeSignature = edges
+    .map((edge) => `${edge.id}|${edge.fromNodeId}|${edge.toNodeId}|${edge.type}`)
+    .sort()
+    .join(";");
+  return `${nodeSignature}::${edgeSignature}`;
+}
+
 export function ThreadPage({
   detail,
+  threadRouteId,
   disableChatInputs = false,
   onUpdateThread,
   onSaveTopologyLayout,
@@ -1214,6 +1543,7 @@ export function ThreadPage({
   const [isTopologyCollapsed, setIsTopologyCollapsed] = useState(false);
   const [isMatrixCollapsed, setIsMatrixCollapsed] = useState(true);
   const [isChatCollapsed, setIsChatCollapsed] = useState(false);
+  const [isSimulationCollapsed, setIsSimulationCollapsed] = useState(false);
   const [isDescriptionEditing, setIsDescriptionEditing] = useState(false);
   const [isTitleEditing, setIsTitleEditing] = useState(false);
   const [titleDraft, setTitleDraft] = useState(detail.thread.title);
@@ -1232,11 +1562,12 @@ export function ThreadPage({
   const [chatError, setChatError] = useState("");
   const [isSendingChat, setIsSendingChat] = useState(false);
   const [assistantError, setAssistantError] = useState("");
-  const [assistantSummaryStatus, setAssistantSummaryStatus] = useState<"success" | "failed" | null>(null);
-  const [selectedAgentModel, setSelectedAgentModel] = useState<string>(AGENT_OPTIONS[0]);
+  const [assistantSummaryStatus, setAssistantSummaryStatus] = useState<AssistantRunSummaryStatus | null>(null);
+  const [selectedAgentModel, setSelectedAgentModel] = useState<AssistantModel>(() =>
+    readStoredAssistantModel(detail.thread.id),
+  );
   const [isRunningAssistant, setIsRunningAssistant] = useState(false);
   const isChatInputsDisabled = disableChatInputs;
-  const isAssistantRunEnabled = onRunAssistant && !assistantRunDisabledMessage;
   const [isClosingThread, setIsClosingThread] = useState(false);
   const [isCommittingThread, setIsCommittingThread] = useState(false);
   const [isCloningThread, setIsCloningThread] = useState(false);
@@ -1249,8 +1580,18 @@ export function ThreadPage({
   const [cloneTitle, setCloneTitle] = useState(detail.thread.title);
   const [cloneDescription, setCloneDescription] = useState(detail.thread.description ?? "");
   const [pendingPlanActionId, setPendingPlanActionId] = useState<string | null>(null);
+  const [showNetworkEdges, setShowNetworkEdges] = useState(true);
+  const [showDependencyEdges, setShowDependencyEdges] = useState(true);
+  const [visibleOwnerships, setVisibleOwnerships] = useState<Set<TopologyOwnership>>(
+    () => new Set(["first_party", "third_party"]),
+  );
+  const [visibleBoundaries, setVisibleBoundaries] = useState<Set<TopologyBoundary>>(
+    () => new Set(["internal", "external"]),
+  );
   const [topologyError, setTopologyError] = useState("");
   const [isSavingTopologyLayout, setIsSavingTopologyLayout] = useState(false);
+  const [isAutoLayouting, setIsAutoLayouting] = useState(false);
+  const [isSimulationSuccess, setIsSimulationSuccess] = useState(false);
   const [documentModal, setDocumentModal] = useState<(MatrixDocumentModal & {
     mode: MatrixDocumentModalMode;
     selectedConcern: string;
@@ -1270,6 +1611,9 @@ export function ThreadPage({
   const [isDocumentModalBusy, setIsDocumentModalBusy] = useState(false);
   const [documentModalError, setDocumentModalError] = useState("");
   const { user } = useAuth();
+  const threadDisplayId = /^\d+$/.test(threadRouteId?.trim() ?? "")
+    ? threadRouteId!.trim()
+    : (threadRouteId?.trim() ?? detail.thread.id).slice(0, 8);
 
   const sanitizeAssistantResponseText = (input: string) => {
     const noisePatterns = [
@@ -1293,7 +1637,8 @@ export function ThreadPage({
   };
 
   const setAssistantRunSummary = (payload: AssistantRunResponse) => {
-    setAssistantSummaryStatus(payload.summary.status);
+    const summary = getRunSummary(payload);
+    setAssistantSummaryStatus(summary.status);
   };
 
   const updateAssistantSummary = (payload: AssistantRunResponse) => {
@@ -1307,13 +1652,45 @@ export function ThreadPage({
   const isThreadOpen = detail.thread.status === "open";
   const effectiveCanEdit = detail.permissions.canEdit && isThreadOpen;
   const canCloneThread = isFinalizedThreadStatus(detail.thread.status) && detail.permissions.canEdit && !!onCloneThread;
+  const isAssistantRunEnabled = onRunAssistant && !assistantRunDisabledMessage;
+  const isAssistantModelSelectEnabled = isAssistantRunEnabled && !isChatInputsDisabled && !isRunningAssistant && effectiveCanEdit;
 
-  type FullscreenTab = "topology" | "matrix" | "chat";
+  type FullscreenTab = "topology" | "matrix" | "chat" | "simulation";
   const titleInputRef = useRef<HTMLInputElement>(null);
   const fullscreenRef = useRef<HTMLDivElement>(null);
   const reactFlowRef = useRef<ReactFlowInstance | null>(null);
+  const autoLayoutInFlightRef = useRef(false);
+  const pendingAutoLayoutFitViewRef = useRef(false);
+  const previousTopologySignatureRef = useRef<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [fullscreenTab, setFullscreenTab] = useState<FullscreenTab>("topology");
+
+  const triggerVisibleFitViewControl = useCallback(() => {
+    if (typeof document === "undefined") return false;
+    const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>(".react-flow__controls-fitview"));
+    if (buttons.length === 0) return false;
+    const visibleButton = buttons.find((button) => button.offsetParent !== null) ?? buttons[0];
+    visibleButton.click();
+    return true;
+  }, []);
+
+  const scheduleTopologyFitView = useCallback(() => {
+    const runFitView = () => {
+      const clicked = triggerVisibleFitViewControl();
+      if (clicked) return;
+      reactFlowRef.current?.fitView();
+    };
+    const attemptDelays = [0, 140, 320];
+    for (const delayMs of attemptDelays) {
+      setTimeout(() => {
+        if (typeof requestAnimationFrame === "function") {
+          requestAnimationFrame(() => requestAnimationFrame(runFitView));
+          return;
+        }
+        runFitView();
+      }, delayMs);
+    }
+  }, [triggerVisibleFitViewControl]);
 
   useEffect(() => {
     if (!isTitleEditing) {
@@ -1350,6 +1727,24 @@ export function ThreadPage({
     setCloneDescription(detail.thread.description ?? "");
   }, [detail.thread.title, detail.thread.description]);
 
+  useEffect(() => {
+    setSelectedAgentModel(readStoredAssistantModel(detail.thread.id));
+  }, [detail.thread.id]);
+
+  useEffect(() => {
+    setIsSimulationSuccess(false);
+  }, [detail.thread.id]);
+
+  useEffect(() => {
+    if (!isAssistantModelSelectEnabled) return;
+    try {
+      localStorage.setItem(threadModelStorageKey(detail.thread.id), selectedAgentModel);
+      localStorage.setItem(MODEL_STORAGE_KEY_GLOBAL, selectedAgentModel);
+    } catch {
+      // Ignore storage failures.
+    }
+  }, [detail.thread.id, selectedAgentModel, isAssistantModelSelectEnabled]);
+
   const toggleConcern = useCallback((name: string) => {
     setVisibleConcerns((prev) => {
       const next = new Set(prev);
@@ -1359,6 +1754,32 @@ export function ThreadPage({
         next.add(name);
       }
       return next.size > 0 ? next : prev;
+    });
+  }, []);
+
+  const toggleVisibleOwnership = useCallback((ownership: TopologyOwnership) => {
+    setVisibleOwnerships((prev) => {
+      const next = new Set(prev);
+      if (next.has(ownership)) {
+        if (next.size === 1) return prev;
+        next.delete(ownership);
+        return next;
+      }
+      next.add(ownership);
+      return next;
+    });
+  }, []);
+
+  const toggleVisibleBoundary = useCallback((boundary: TopologyBoundary) => {
+    setVisibleBoundaries((prev) => {
+      const next = new Set(prev);
+      if (next.has(boundary)) {
+        if (next.size === 1) return prev;
+        next.delete(boundary);
+        return next;
+      }
+      next.add(boundary);
+      return next;
     });
   }, []);
 
@@ -1649,7 +2070,10 @@ export function ThreadPage({
     [detail.matrix.documents, openDocumentPicker],
   );
 
-  const flowLayoutModel = useMemo(() => buildFlowLayoutModel(detail.topology.nodes), [detail.topology.nodes]);
+  const flowLayoutModel = useMemo(
+    () => buildFlowLayoutModel(detail.topology.nodes, visibleOwnerships, visibleBoundaries),
+    [detail.topology.nodes, visibleOwnerships, visibleBoundaries],
+  );
   const initialFlowNodes = useMemo(
     () =>
       buildFlowNodes(
@@ -1667,7 +2091,42 @@ export function ThreadPage({
       [flowLayoutModel, nodeDocumentGroups, nodeArtifacts, openTopologyDocumentPicker, openRootPromptCreator, openEditDocumentModal, effectiveCanEdit, detail.systemPrompt, detail.systemPromptTitle, detail.systemPrompts],
   );
   const [flowNodes, setFlowNodes, onFlowNodesChange] = useNodesState(initialFlowNodes);
-  const flowEdges = useMemo(() => buildFlowEdges(detail.topology.edges, flowLayoutModel), [detail.topology.edges, flowLayoutModel]);
+  const flowEdges = useMemo(
+    () => buildFlowEdges(detail.topology.edges, flowLayoutModel, showNetworkEdges, showDependencyEdges),
+    [detail.topology.edges, flowLayoutModel, showNetworkEdges, showDependencyEdges],
+  );
+  const topologyStructureSignature = useMemo(
+    () => buildTopologyStructureSignature(detail.topology.nodes, detail.topology.edges),
+    [detail.topology.nodes, detail.topology.edges],
+  );
+  const canComputeAutoLayout = flowLayoutModel.visibleNodes.length > 1;
+  const canPersistAutoLayout = effectiveCanEdit && Boolean(onSaveTopologyLayout);
+  const canAutoLayout = canPersistAutoLayout && canComputeAutoLayout;
+
+  const rebuildRootGroupNodeInFlow = useCallback(
+    (nodes: Node[]): Node[] => {
+      if (!flowLayoutModel.rootNode) return nodes;
+      const childNodes = nodes.filter((node) => node.id !== ROOT_GROUP_ID);
+      const updatedRootNode = buildRootGroupNode(
+        childNodes,
+        flowLayoutModel.rootNode,
+        nodeDocumentGroups.get(flowLayoutModel.rootNode.id) ?? { document: [], skill: [] },
+        nodeArtifacts.get(flowLayoutModel.rootNode.id) ?? [],
+        effectiveCanEdit,
+        openTopologyDocumentPicker,
+        openRootPromptCreator,
+        openEditDocumentModal,
+        detail.systemPrompt,
+        detail.systemPromptTitle,
+        detail.systemPrompts,
+      );
+      if (!updatedRootNode) return nodes;
+      return nodes.some((node) => node.id === ROOT_GROUP_ID)
+        ? nodes.map((node) => (node.id === ROOT_GROUP_ID ? updatedRootNode : node))
+        : [updatedRootNode, ...childNodes];
+    },
+    [flowLayoutModel.rootNode, nodeDocumentGroups, nodeArtifacts, effectiveCanEdit, openTopologyDocumentPicker, openRootPromptCreator, openEditDocumentModal, detail.systemPrompt, detail.systemPromptTitle, detail.systemPrompts],
+  );
 
   const handleNodesChange = useCallback(
     (changes: NodeChange[]) => {
@@ -1677,31 +2136,71 @@ export function ThreadPage({
         (c) => (c.type === "position" && c.dragging) || c.type === "dimensions",
       );
       if (!needsRecalc) return;
-      setFlowNodes((currentNodes) => {
-        const childNodes = currentNodes.filter((n) => n.id !== ROOT_GROUP_ID);
-        const updated = buildRootGroupNode(
-          childNodes,
-          flowLayoutModel.rootNode!,
-          nodeDocumentGroups.get(flowLayoutModel.rootNode!.id) ?? { document: [], skill: [] },
-          nodeArtifacts.get(flowLayoutModel.rootNode!.id) ?? [],
-          effectiveCanEdit,
-          openTopologyDocumentPicker,
-          openRootPromptCreator,
-          openEditDocumentModal,
-          detail.systemPrompt,
-          detail.systemPromptTitle,
-          detail.systemPrompts,
-        );
-        if (!updated) return currentNodes;
-        return currentNodes.map((n) => (n.id === ROOT_GROUP_ID ? updated : n));
-      });
+      setFlowNodes((currentNodes) => rebuildRootGroupNodeInFlow(currentNodes));
     },
-    [onFlowNodesChange, flowLayoutModel.rootNode, setFlowNodes, nodeDocumentGroups, nodeArtifacts, effectiveCanEdit, openTopologyDocumentPicker, openRootPromptCreator, openEditDocumentModal, detail.systemPrompt, detail.systemPromptTitle, detail.systemPrompts],
+    [onFlowNodesChange, flowLayoutModel.rootNode, setFlowNodes, rebuildRootGroupNodeInFlow],
   );
 
   useEffect(() => {
     setFlowNodes(initialFlowNodes);
   }, [initialFlowNodes, setFlowNodes]);
+
+  useEffect(() => {
+    if (!pendingAutoLayoutFitViewRef.current) return;
+    scheduleTopologyFitView();
+    if (!isAutoLayouting && !isSavingTopologyLayout) {
+      pendingAutoLayoutFitViewRef.current = false;
+    }
+  }, [flowNodes, isAutoLayouting, isSavingTopologyLayout, scheduleTopologyFitView]);
+
+  const runAutoLayout = useCallback(async ({ sourceNodes, persist }: AutoLayoutRunOptions = {}) => {
+    if (!canComputeAutoLayout) return;
+    if (autoLayoutInFlightRef.current) return;
+    autoLayoutInFlightRef.current = true;
+
+    const nodesForLayout = sourceNodes ?? flowNodes;
+    const shouldPersist = persist ?? canPersistAutoLayout;
+    setTopologyError("");
+    setIsAutoLayouting(true);
+
+    try {
+      const elkGraph = buildElkGraph(nodesForLayout, detail.topology.edges, flowLayoutModel);
+      const laidOutGraph = await TOPOLOGY_ELK.layout(elkGraph);
+      const appliedLayout = applyElkPositionsToFlowNodes(laidOutGraph, nodesForLayout);
+      if (appliedLayout.positions.length === 0) {
+        throw new Error("Auto layout did not return any node positions.");
+      }
+
+      const nextNodes = rebuildRootGroupNodeInFlow(appliedLayout.nodes);
+      pendingAutoLayoutFitViewRef.current = true;
+      setFlowNodes(nextNodes);
+
+      if (shouldPersist && onSaveTopologyLayout) {
+        setIsSavingTopologyLayout(true);
+        try {
+          const result = await onSaveTopologyLayout({ positions: appliedLayout.positions });
+          const error = getErrorMessage(result);
+          if (error) {
+            setTopologyError(error);
+          }
+        } finally {
+          setIsSavingTopologyLayout(false);
+        }
+      }
+    } catch (error: unknown) {
+      setTopologyError(error instanceof Error ? error.message : "Failed to auto layout topology.");
+    } finally {
+      setIsAutoLayouting(false);
+      autoLayoutInFlightRef.current = false;
+    }
+  }, [canComputeAutoLayout, flowNodes, canPersistAutoLayout, detail.topology.edges, flowLayoutModel, rebuildRootGroupNodeInFlow, setFlowNodes, onSaveTopologyLayout, scheduleTopologyFitView]);
+
+  useEffect(() => {
+    const previous = previousTopologySignatureRef.current;
+    previousTopologySignatureRef.current = topologyStructureSignature;
+    if (previous === null || previous === topologyStructureSignature) return;
+    void runAutoLayout({ sourceNodes: initialFlowNodes, persist: canPersistAutoLayout });
+  }, [topologyStructureSignature, initialFlowNodes, canPersistAutoLayout, runAutoLayout]);
 
   const cellsByKey = useMemo(() => {
     const map = new Map<string, MatrixCell>();
@@ -1719,10 +2218,30 @@ export function ThreadPage({
     [detail.matrix.concerns, visibleConcerns],
   );
 
+  const visibleMatrixNodeIds = useMemo(
+    () => computeVisibleTopologyNodeIds(detail.matrix.nodes, visibleOwnerships, visibleBoundaries),
+    [detail.matrix.nodes, visibleOwnerships, visibleBoundaries],
+  );
+
+  const filteredMatrixNodes = useMemo(
+    () => detail.matrix.nodes.filter((node) => visibleMatrixNodeIds.has(node.id)),
+    [detail.matrix.nodes, visibleMatrixNodeIds],
+  );
+
+  const matrixSystemRootNode = useMemo(() => {
+    const explicitRootNode = filteredMatrixNodes.find((node) => node.kind === "Root");
+    if (explicitRootNode) return explicitRootNode;
+    const rootCandidates = filteredMatrixNodes.filter((node) => node.parentId === null);
+    return rootCandidates.length === 1 ? rootCandidates[0] : null;
+  }, [filteredMatrixNodes]);
+
   const treeOrderedMatrixNodes = useMemo(() => {
     const childrenOf = new Map<string | null, TopologyNode[]>();
-    for (const node of detail.matrix.nodes) {
-      const key = node.parentId ?? null;
+    for (const node of filteredMatrixNodes) {
+      if (matrixSystemRootNode && node.id === matrixSystemRootNode.id) continue;
+      const key = matrixSystemRootNode && node.parentId === matrixSystemRootNode.id
+        ? null
+        : node.parentId ?? null;
       const list = childrenOf.get(key) ?? [];
       list.push(node);
       childrenOf.set(key, list);
@@ -1730,17 +2249,63 @@ export function ThreadPage({
     for (const list of childrenOf.values()) {
       list.sort(sortNodes);
     }
+    const topLevelNodes = childrenOf.get(null);
+    if (topLevelNodes) {
+      topLevelNodes.sort(sortMatrixTopLevelNodes);
+    }
 
     const result: Array<{ node: TopologyNode; depth: number }> = [];
+    const visited = new Set<string>();
     const walk = (parentId: string | null, depth: number) => {
       for (const node of childrenOf.get(parentId) ?? []) {
+        if (visited.has(node.id)) continue;
+        visited.add(node.id);
         result.push({ node, depth });
         walk(node.id, depth + 1);
       }
     };
     walk(null, 0);
+
+    const remainingNodes = filteredMatrixNodes
+      .filter((node) => (!matrixSystemRootNode || node.id !== matrixSystemRootNode.id) && !visited.has(node.id))
+      .sort(sortNodes);
+    for (const node of remainingNodes) {
+      result.push({ node, depth: 0 });
+      walk(node.id, 1);
+    }
+
     return result;
-  }, [detail.matrix.nodes]);
+  }, [filteredMatrixNodes, matrixSystemRootNode]);
+
+  const matrixNodePathById = useMemo(() => {
+    const byId = new Map(filteredMatrixNodes.map((node) => [node.id, node]));
+    const paths = new Map<string, string>();
+
+    for (const node of filteredMatrixNodes) {
+      if (matrixSystemRootNode && node.id === matrixSystemRootNode.id) continue;
+
+      const pathParts: string[] = [node.name];
+      let parentId = node.parentId;
+      while (parentId) {
+        const parent = byId.get(parentId);
+        if (!parent) break;
+        if (matrixSystemRootNode && parent.id === matrixSystemRootNode.id) {
+          pathParts.unshift("System");
+          break;
+        }
+        pathParts.unshift(parent.name);
+        parentId = parent.parentId;
+      }
+
+      if (matrixSystemRootNode && pathParts[0] !== "System") {
+        pathParts.unshift("System");
+      }
+
+      paths.set(node.id, pathParts.join(" / "));
+    }
+
+    return paths;
+  }, [filteredMatrixNodes, matrixSystemRootNode]);
 
   const selectedConcernsForModal = useMemo(() => {
     if (!documentModal) return [];
@@ -2325,6 +2890,7 @@ export function ThreadPage({
         chatMessageId: userMessageId,
         mode: "direct",
         planActionId: null,
+        model: selectedAgentModel,
       });
 
       const runError = getErrorMessage(runResult);
@@ -2362,6 +2928,7 @@ export function ThreadPage({
         chatMessageId: null,
         mode,
         planActionId: mode === "direct" ? (planActionId ?? null) : null,
+        model: selectedAgentModel,
       });
 
       const error = getErrorMessage(result);
@@ -2388,7 +2955,7 @@ export function ThreadPage({
         return;
       }
 
-      setAssistantSummaryStatus(payload.summary.status);
+      setAssistantSummaryStatus(getRunSummary(payload).status);
     } finally {
       setIsRunningAssistant(false);
     }
@@ -2411,6 +2978,11 @@ export function ThreadPage({
     },
     [effectiveCanEdit, onSaveTopologyLayout],
   );
+
+  const handleAutoLayout = useCallback(() => {
+    if (!canAutoLayout) return;
+    void runAutoLayout();
+  }, [canAutoLayout, runAutoLayout]);
 
   const renderDocumentModal = () => {
     if (!documentModal) return null;
@@ -2859,10 +3431,10 @@ export function ThreadPage({
           </div>
         ) : (
           <>
-            <h1 className="thread-view-title">
-              {detail.thread.title}{" "}
-              <span className="thread-view-title-number">#{detail.thread.projectThreadId}</span>
-            </h1>
+                    <h1 className="thread-view-title">
+                      {detail.thread.title}{" "}
+                      <span className="thread-view-title-number">#{threadDisplayId}</span>
+                    </h1>
             {effectiveCanEdit && (
               <button
                 className="btn btn-secondary thread-view-edit-btn"
@@ -2975,6 +3547,65 @@ export function ThreadPage({
       {(() => {
         const renderTopologyBody = () => (
           <>
+            <div className="thread-topology-filters">
+              <div className="thread-topology-filter-group">
+                <span className="matrix-concern-filter-label">Edges</span>
+                <label className={`matrix-concern-chip thread-topology-filter-chip ${showNetworkEdges ? "matrix-concern-chip--active" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={showNetworkEdges}
+                    onChange={() => setShowNetworkEdges((value) => !value)}
+                  />
+                  Network
+                </label>
+                <label className={`matrix-concern-chip thread-topology-filter-chip ${showDependencyEdges ? "matrix-concern-chip--active" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={showDependencyEdges}
+                    onChange={() => setShowDependencyEdges((value) => !value)}
+                  />
+                  Dependency
+                </label>
+              </div>
+              <div className="thread-topology-filter-group">
+                <span className="matrix-concern-filter-label">Ownership</span>
+                <label className={`matrix-concern-chip thread-topology-filter-chip ${visibleOwnerships.has("first_party") ? "matrix-concern-chip--active" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={visibleOwnerships.has("first_party")}
+                    onChange={() => toggleVisibleOwnership("first_party")}
+                  />
+                  First-party
+                </label>
+                <label className={`matrix-concern-chip thread-topology-filter-chip ${visibleOwnerships.has("third_party") ? "matrix-concern-chip--active" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={visibleOwnerships.has("third_party")}
+                    onChange={() => toggleVisibleOwnership("third_party")}
+                  />
+                  Third-party
+                </label>
+              </div>
+              <div className="thread-topology-filter-group">
+                <span className="matrix-concern-filter-label">Boundary</span>
+                <label className={`matrix-concern-chip thread-topology-filter-chip ${visibleBoundaries.has("internal") ? "matrix-concern-chip--active" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={visibleBoundaries.has("internal")}
+                    onChange={() => toggleVisibleBoundary("internal")}
+                  />
+                  Internal
+                </label>
+                <label className={`matrix-concern-chip thread-topology-filter-chip ${visibleBoundaries.has("external") ? "matrix-concern-chip--active" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={visibleBoundaries.has("external")}
+                    onChange={() => toggleVisibleBoundary("external")}
+                  />
+                  External
+                </label>
+              </div>
+            </div>
             <div className="thread-topology-canvas">
               <ReactFlow
                 nodes={flowNodes}
@@ -2991,9 +3622,19 @@ export function ThreadPage({
                 deleteKeyCode={null}
               >
                 <Background gap={14} size={1} />
-                <Controls />
+                <Controls>
+                  <ControlButton
+                    onClick={handleAutoLayout}
+                    aria-label="Auto layout"
+                    title="Auto layout"
+                    disabled={!canAutoLayout || isSavingTopologyLayout || isAutoLayouting}
+                  >
+                    <LayoutGrid size={14} />
+                  </ControlButton>
+                </Controls>
               </ReactFlow>
             </div>
+            {isAutoLayouting && <p className="matrix-empty">Calculating layout...</p>}
             {isSavingTopologyLayout && <p className="matrix-empty">Saving layout…</p>}
             {topologyError && <p className="field-error">{topologyError}</p>}
           </>
@@ -3001,6 +3642,46 @@ export function ThreadPage({
 
         const renderMatrixBody = () => (
           <>
+            <div className="thread-topology-filters">
+              <div className="thread-topology-filter-group">
+                <span className="matrix-concern-filter-label">Ownership</span>
+                <label className={`matrix-concern-chip thread-topology-filter-chip ${visibleOwnerships.has("first_party") ? "matrix-concern-chip--active" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={visibleOwnerships.has("first_party")}
+                    onChange={() => toggleVisibleOwnership("first_party")}
+                  />
+                  First-party
+                </label>
+                <label className={`matrix-concern-chip thread-topology-filter-chip ${visibleOwnerships.has("third_party") ? "matrix-concern-chip--active" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={visibleOwnerships.has("third_party")}
+                    onChange={() => toggleVisibleOwnership("third_party")}
+                  />
+                  Third-party
+                </label>
+              </div>
+              <div className="thread-topology-filter-group">
+                <span className="matrix-concern-filter-label">Boundary</span>
+                <label className={`matrix-concern-chip thread-topology-filter-chip ${visibleBoundaries.has("internal") ? "matrix-concern-chip--active" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={visibleBoundaries.has("internal")}
+                    onChange={() => toggleVisibleBoundary("internal")}
+                  />
+                  Internal
+                </label>
+                <label className={`matrix-concern-chip thread-topology-filter-chip ${visibleBoundaries.has("external") ? "matrix-concern-chip--active" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={visibleBoundaries.has("external")}
+                    onChange={() => toggleVisibleBoundary("external")}
+                  />
+                  External
+                </label>
+              </div>
+            </div>
             <div className="matrix-concern-filter">
               <span className="matrix-concern-filter-label">Concerns</span>
               {normalizeMatrixConcerns(detail.matrix.concerns).map((c) => (
@@ -3028,18 +3709,11 @@ export function ThreadPage({
                   </tr>
                 </thead>
                 <tbody>
-                  {treeOrderedMatrixNodes.map(({ node, depth }) => {
-                    const isSystemNode = node.parentId === null;
-                    const displayName = isSystemNode ? "System" : node.name;
-                    return (
-                    <tr key={node.id}>
-                      <th className="matrix-node-cell">
-                        <div style={{ paddingLeft: depth * 16 }}>
-                          <strong>{displayName}</strong>
-                          <span>{node.kind}</span>
-                        </div>
-                      </th>
-                      {filteredConcerns.map((concern) => {
+                  {(() => {
+                    const primaryDocType = DOC_TYPES[0] as DocKind;
+                    const matrixColumnSpan = filteredConcerns.length + 1;
+                    const renderMatrixConcernCells = (node: TopologyNode, displayName: string) => {
+                      return filteredConcerns.map((concern) => {
                         const key = buildMatrixCellKey(node.id, concern.name);
                         const cell = cellsByKey.get(key) ?? {
                           nodeId: node.id,
@@ -3058,7 +3732,7 @@ export function ThreadPage({
                             className={isEmpty ? "matrix-td-empty" : undefined}
                             onClick={
                               isEmpty && effectiveCanEdit
-                                ? () => openMatrixCellDocumentPicker(node.id, concern.name, DOC_TYPES[0] as DocKind)
+                                ? () => openMatrixCellDocumentPicker(node.id, concern.name, primaryDocType)
                                 : undefined
                             }
                           >
@@ -3133,7 +3807,7 @@ export function ThreadPage({
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    openMatrixCellDocumentPicker(node.id, concern.name, DOC_TYPES[0] as DocKind);
+                                    openMatrixCellDocumentPicker(node.id, concern.name, primaryDocType);
                                   }}
                                   aria-label={`Add document to ${displayName} × ${concern.name}`}
                                 >
@@ -3143,10 +3817,67 @@ export function ThreadPage({
                             </div>
                           </td>
                         );
-                      })}
-                    </tr>
-                    );
-                  })}
+                      });
+                    };
+
+                    const rows: ReactNode[] = [];
+
+                    if (matrixSystemRootNode) {
+                      rows.push(
+                        <tr key={`${matrixSystemRootNode.id}:system-root`} className="matrix-system-root-row">
+                          <th className="matrix-node-cell matrix-node-cell--system-root">
+                            <div>
+                              <strong>System</strong>
+                              <span>{matrixSystemRootNode.kind}</span>
+                            </div>
+                          </th>
+                          {renderMatrixConcernCells(matrixSystemRootNode, "System")}
+                        </tr>,
+                      );
+                    }
+
+                    for (const { node, depth } of treeOrderedMatrixNodes) {
+                      const visualDepth = depth + 1;
+                      const nodePath = matrixNodePathById.get(node.id);
+                      const isTopLevelHost = node.kind === "Host" && depth === 0;
+                      const isTopLevelLibrary = node.kind === "Library" && depth === 0;
+                      const separatorClassName = isTopLevelHost || isTopLevelLibrary
+                        ? "matrix-separator-row matrix-separator-row--host-break"
+                        : "matrix-separator-row";
+                      rows.push(
+                        <tr key={`${node.id}:separator`} className={separatorClassName} aria-hidden="true">
+                          <td colSpan={matrixColumnSpan} />
+                        </tr>,
+                      );
+                      rows.push(
+                        <tr key={node.id}>
+                          <th className="matrix-node-cell">
+                            <div className="matrix-node-row">
+                              {visualDepth > 0 ? (
+                                <div className="matrix-node-guides" aria-hidden="true">
+                                  {Array.from({ length: visualDepth }).map((_, lineIndex) => (
+                                    <span
+                                      key={`${node.id}:line:${lineIndex}`}
+                                      className="matrix-node-guide-line"
+                                      style={{ left: `${lineIndex * 12 + 6}px` }}
+                                    />
+                                  ))}
+                                </div>
+                              ) : null}
+                              <div className="matrix-node-content" style={{ paddingLeft: visualDepth * 12 + 8 }}>
+                                <strong>{node.name}</strong>
+                                {nodePath ? <span className="matrix-node-path">{nodePath}</span> : null}
+                                <span>{node.kind}</span>
+                              </div>
+                            </div>
+                          </th>
+                          {renderMatrixConcernCells(node, node.name)}
+                        </tr>,
+                      );
+                    }
+
+                    return rows;
+                  })()}
                 </tbody>
               </table>
             </div>
@@ -3189,10 +3920,10 @@ export function ThreadPage({
           return sanitizeAssistantResponseText(content);
         };
 
-        const getChatSenderName = (role: "User" | "Assistant" | "System") => {
-          if (role === "User") return detail.thread.createdByHandle;
-          if (role === "Assistant") return selectedAgentModel;
-          return role;
+        const getChatSenderName = (message: ChatMessage) => {
+          if (message.role === "User") return detail.thread.createdByHandle;
+          if (message.role === "Assistant") return message.senderName ?? "Assistant";
+          return message.role;
         };
 
         const latestAssistantMessageId = [...visibleChatMessages]
@@ -3218,7 +3949,7 @@ export function ThreadPage({
                   >
                     <header>
                       <div className="thread-chat-message-header-left">
-                        <strong>{getChatSenderName(message.role)}</strong>
+                        <strong>{getChatSenderName(message)}</strong>
                       </div>
                       <span>{formatDateTime(message.createdAt)}</span>
                     </header>
@@ -3233,12 +3964,12 @@ export function ThreadPage({
 
             {effectiveCanEdit ? (
               <div className="thread-chat-form">
-                <div className="thread-chat-input-row">
-                  <textarea
-                    className="field-input thread-chat-input"
-                    rows={4}
-                    placeholder="Ask StaffX anything"
-                    value={chatInput}
+                  <div className="thread-chat-input-row">
+                    <textarea
+                      className="field-input thread-chat-input"
+                      rows={4}
+                      placeholder="Ask AntiClodeX anything"
+                      value={chatInput}
                     onChange={(event) => setChatInput(event.target.value)}
                     disabled={isSendingChat || isChatInputsDisabled}
                   />
@@ -3249,13 +3980,52 @@ export function ThreadPage({
                     disabled={isSendingChat || !chatInput.trim() || isChatInputsDisabled}
                     aria-label="Send message"
                   >
-                    <Send size={14} />
-                  </button>
+                      <Send size={14} />
+                    </button>
+                  </div>
+                  <div className="thread-chat-model-row">
+                    <select
+                      id={`assistant-model-select-${detail.thread.id}`}
+                      className="field-input thread-chat-agent-select"
+                      aria-label="Assistant model"
+                      value={selectedAgentModel}
+                      onChange={(event) => setSelectedAgentModel(event.currentTarget.value as AssistantModel)}
+                      disabled={!isAssistantModelSelectEnabled}
+                    >
+                      {ASSISTANT_MODELS.map((model) => (
+                        <option key={model.key} value={model.key}>
+                          {model.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
-              </div>
             ) : (
               <p className="thread-chat-disabled-copy">Only owners and editors can use the chat.</p>
             )}
+          </div>
+        );
+
+        const renderSimulationBody = () => (
+          <div className="thread-simulation-body">
+            <p className="thread-simulation-description">
+              Run your simulation flow from the thread context.
+            </p>
+            <div className="thread-simulation-actions">
+              <button
+                className="btn"
+                type="button"
+                onClick={() => setIsSimulationSuccess(true)}
+              >
+                Start simulation
+              </button>
+              {isSimulationSuccess ? (
+                <span className="thread-simulation-success">
+                  <CheckCircle2 size={16} />
+                  Success
+                </span>
+              ) : null}
+            </div>
           </div>
         );
 
@@ -3336,6 +4106,31 @@ export function ThreadPage({
               )}
             </section>
 
+            <section className="thread-card thread-collapsible">
+              <div className="thread-card-header" onClick={() => setIsSimulationCollapsed((current) => !current)}>
+                <h3>Simulation</h3>
+                <div className="thread-card-actions">
+                  <button
+                    className="btn-icon thread-card-action"
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); enterFullscreen("simulation"); }}
+                    aria-label="Enter fullscreen simulation"
+                  >
+                    <FullscreenIcon size={16} />
+                  </button>
+                  <span className="thread-card-action thread-collapse-icon" aria-hidden>
+                    {isSimulationCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+                  </span>
+                </div>
+              </div>
+
+              {!isSimulationCollapsed && !isFullscreen && (
+                <div className="thread-card-body">
+                  {renderSimulationBody()}
+                </div>
+              )}
+            </section>
+
             {canCloneThread && (
               <section className="thread-card thread-commit-card">
                 <p className="thread-commit-text">
@@ -3412,6 +4207,13 @@ export function ThreadPage({
                   >
                     Chat
                   </button>
+                  <button
+                    type="button"
+                    className={`thread-fullscreen-tab${fullscreenTab === "simulation" ? " thread-fullscreen-tab--active" : ""}`}
+                    onClick={() => setFullscreenTab("simulation")}
+                  >
+                    Simulation
+                  </button>
                 </div>
                 <button
                   className="btn-icon thread-card-action"
@@ -3426,6 +4228,7 @@ export function ThreadPage({
                 {fullscreenTab === "topology" && renderTopologyBody()}
                 {fullscreenTab === "matrix" && renderMatrixBody()}
                 {fullscreenTab === "chat" && renderChatBody()}
+                {fullscreenTab === "simulation" && renderSimulationBody()}
               </div>
             </section>
           </>

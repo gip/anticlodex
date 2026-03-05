@@ -330,20 +330,6 @@ export function ProjectSettingsPage({
         {concernError && <p className="field-error">{concernError}</p>}
       </section>
 
-      {isOwner && (
-        <section className="thread-section">
-          <h3 className="thread-section-title">Archive</h3>
-          <button
-            className="btn btn-danger"
-            type="button"
-            onClick={openArchiveModal}
-            disabled={isArchiving}
-          >
-            {isArchiving ? "Archiving…" : "Archive"}
-          </button>
-        </section>
-      )}
-
       {/* Contributors section */}
       <section className="thread-section">
         <div className="collab-section-header">
@@ -396,6 +382,20 @@ export function ProjectSettingsPage({
           ))}
         </div>
       </section>
+
+      {isOwner && (
+        <section className="thread-section">
+          <h3 className="thread-section-title">Danger</h3>
+          <button
+            className="btn btn-danger"
+            type="button"
+            onClick={openArchiveModal}
+            disabled={isArchiving}
+          >
+            {isArchiving ? "Archiving…" : "Archive"}
+          </button>
+        </section>
+      )}
 
       {showAdd && (
         <AddCollaboratorModal

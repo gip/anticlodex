@@ -12,14 +12,14 @@ import {
   diffOpenShipSnapshots,
   type AgentRunPlanChange,
   resolveThreadWorkspacePath,
-  runClaudeAgent,
+  runAgent,
   type AgentRunResult,
   snapshotOpenShipBundle,
   summarizeOpenShipBundleChanges,
-} from "@staffx/agent-runtime";
+} from "@acx/agent-runtime";
 
 const DEFAULT_POLL_INTERVAL_MS = 1000;
-const DEFAULT_RUNNER_ID = process.env.STAFFX_AGENT_RUNNER_ID || "api-worker";
+const DEFAULT_RUNNER_ID = process.env.ACX_AGENT_RUNNER_ID || "api-worker";
 const OPENSHIP_BUNDLE_DIR_NAME = "openship";
 const OPENSHIP_MANIFEST_FILE_NAME = "openship.yaml";
 const OPENSHIP_ROOT_NODE_ID = "s.root";
@@ -706,7 +706,7 @@ interface RunClaudeAgentResult {
   messages: string[];
   changes: AgentRunPlanChange[];
   error?: string;
-  openShipBundleFiles?: OpenShipBundleFile[];
+  openShipBundleFiles: OpenShipBundleFile[];
 }
 
 async function runClaudeAgentWithBundleDiff(
@@ -714,6 +714,7 @@ async function runClaudeAgentWithBundleDiff(
   systemPrompt: string | null,
   workspace: string,
   threadId: string,
+  model: string | undefined,
 ): Promise<RunClaudeAgentResult> {
   const openShipBundleDir = join(workspace, OPENSHIP_BUNDLE_DIR_NAME);
   console.info("[agent-runner] bundle generation start", {
@@ -731,6 +732,7 @@ async function runClaudeAgentWithBundleDiff(
       messages: [`OpenShip pre-run generation failed: ${message}`],
       changes: [],
       error: message,
+      openShipBundleFiles: [],
     };
   }
 
@@ -745,26 +747,37 @@ async function runClaudeAgentWithBundleDiff(
       openShipBundleDir: preRunDir,
     });
   }
-  let runResult: AgentRunResult;
+  let runResult: RunClaudeAgentResult;
   try {
-    console.info("[agent-runner] invoking Claude agent", {
+    console.info("[agent-runner] invoking agent", {
       threadId,
       openShipBundleDir,
       workspace,
       systemPrompt,
+      model,
     });
-    runResult = await runClaudeAgent({
+    const result = await runAgent({
       prompt: runPrompt,
       cwd: workspace,
+      model,
       systemPrompt: systemPrompt ?? undefined,
       allowedTools: ["Read", "Grep", "Glob", "Bash", "Edit", "Write"],
     });
-  } catch (error: unknown) {
     runResult = {
-      status: "failed" as QueueStatus,
+      status: result.status,
+      messages: result.messages,
+      changes: result.changes,
+      error: result.error,
+      openShipBundleFiles: [],
+    };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    runResult = {
+      status: "failed",
       messages: [`Execution failed: ${error instanceof Error ? error.message : String(error)}`],
       changes: [],
-      error: error instanceof Error ? error.message : String(error),
+      error: message,
+      openShipBundleFiles: [],
     };
   }
 
@@ -809,6 +822,7 @@ async function runClaudeAgentWithBundleDiff(
         messages: [...runResult.messages, `OpenShip reconciliation snapshot failed: ${runSummaryError(error)}`],
         changes: runResult.changes,
         error: runSummaryError(error),
+        openShipBundleFiles: [],
       };
     }
   }
@@ -838,6 +852,7 @@ async function applyOpenShipBundleResult(
       messages: [...result.messages, `OpenShip reconciliation failed: ${runSummaryError(error)}`],
       changes: result.changes,
       error: runSummaryError(error),
+      openShipBundleFiles: [],
     };
   }
 
@@ -848,8 +863,9 @@ async function runAgentAndApplyResult(
   systemPrompt: string | null,
   workspace: string,
   threadId: string,
+  model: string | undefined,
 ): Promise<RunClaudeAgentResult> {
-  const runResult = await runClaudeAgentWithBundleDiff(runPrompt, systemPrompt, workspace, threadId);
+  const runResult = await runClaudeAgentWithBundleDiff(runPrompt, systemPrompt, workspace, threadId, model);
   const reconciled = await applyOpenShipBundleResult(threadId, runResult);
   return reconciled;
 }
@@ -885,7 +901,7 @@ export function startAgentRunner(options: AgentRunnerOptions = {}): () => void {
       const workspace = resolveThreadWorkspacePath({
         projectId: run.project_id,
         threadId: run.thread_id,
-        baseDir: process.env.STAFFX_PROJECTS_ROOT,
+        baseDir: process.env.ACX_PROJECTS_ROOT,
       });
 
       console.info("[agent-runner] starting", {
@@ -899,6 +915,7 @@ export function startAgentRunner(options: AgentRunnerOptions = {}): () => void {
         run.system_prompt ?? null,
         workspace,
         run.thread_id,
+        run.model,
       );
 
       await updateAgentRunResult(

@@ -1,0 +1,23 @@
+"id": "h.data-runtime"
+"kind": "Host"
+"name": "Data Runtime"
+"parentId": "s.root"
+"metadata":
+  "openshipKey": "data-runtime"
+  "ownership": "first_party"
+  "boundary": "internal"
+  "platform": "postgres-host"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:5b89da29b2aa7f1914dc2b4ca2a2872bf5a8e0a875a774e31f7f373c38faaaa4"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:3d83c63180fd8093a40c134c7fb70c5f06634704084a6ce15ea6bcea6bd5f78a"
+    "skillRefs": []
+"artifacts":
+  "Summary":
+    - "a.h.data-runtime.features.summary.v1"
+  "Docs":
+    - "a.h.data-runtime.specs.docs.v1"

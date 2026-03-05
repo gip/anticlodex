@@ -1,5 +1,5 @@
 {
-  "name": "@staffx/api",
+  "name": "@acx/api",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -7,13 +7,16 @@
     "dev": "tsx watch --env-file=.env.local src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "migrate": "tsx --env-file=.env.local src/migrate.ts"
+    "migrate": "node-pg-migrate up --config node-pg-migrate.config.cjs --migrations-dir db/migrations",
+    "migrate:status": "node-pg-migrate up --dry-run --config node-pg-migrate.config.cjs --migrations-dir db/migrations",
+    "migrate:down:last": "node-pg-migrate down 1 --config node-pg-migrate.config.cjs --migrations-dir db/migrations"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.0",
-    "@staffx/agent-runtime": "workspace:*",
+    "@acx/agent-runtime": "workspace:*",
     "fastify": "^5.2.1",
     "jose": "^6.1.3",
+    "node-pg-migrate": "^7.7.0",
     "yaml": "^2.4.2",
     "pg": "^8.13.1",
     "unique-names-generator": "^4.7.1"

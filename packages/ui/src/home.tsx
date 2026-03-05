@@ -11,9 +11,9 @@ export const isFinalizedThreadStatus = (status: ThreadStatus): boolean =>
 
 export interface Thread {
   id: string;
+  projectThreadId?: number | null;
   title: string | null;
   description: string | null;
-  projectThreadId: number | null;
   status: ThreadStatus;
   sourceThreadId?: string | null;
   createdBy?: string;
@@ -34,6 +34,11 @@ export interface Project {
 
 const TEMPLATES = [
   { id: "blank", label: "Blank", description: "Empty project, start from scratch" },
+  {
+    id: "acx-openship-bundle-import",
+    label: "AntiClodeX OpenShip runtime import",
+    description: "Imports the canonical OpenShip bundle from ./openship into the project",
+  },
   {
     id: "webserver-postgres-auth0-google-vercel",
     label: "Webserver + Postgres + Auth0 Google login + Vercel",
@@ -199,9 +204,15 @@ interface HomeProps {
   onCheckProjectName?: (name: string) => Promise<boolean>;
 }
 
+const THREAD_PREVIEW_COUNT = 3;
+
 export function Home({ projects, onCreateProject, onCheckProjectName }: HomeProps) {
   const { isAuthenticated, isLoading, login } = useAuth();
   const [showCreate, setShowCreate] = useState(false);
+  const projectCount = projects.length;
+  const threadCount = projects.reduce((total, project) => total + project.threads.length, 0);
+  const publicProjectCount = projects.filter((project) => project.visibility === "public").length;
+  const privateProjectCount = projectCount - publicProjectCount;
 
   if (isLoading) {
     return (
@@ -213,57 +224,139 @@ export function Home({ projects, onCreateProject, onCheckProjectName }: HomeProp
 
   if (!isAuthenticated) {
     return (
-      <main className="hero">
-        <h1 className="hero-tagline">A flight simulator for your AI-generated software.</h1>
-        <button className="btn hero-cta" onClick={login}>Log In</button>
-        <p style={{ textAlign: "center" }}>
-          <i>
-            StaffX is the human control plane for AI-generated software:<br />
-            it lets domain experts go from a product description to a deployed,
-            maintainable system<br />
-            using curated reference architectures, with visual preview, and<br />
-            simulation, and risk scoring that keep the system understandable and safe
-            to change as it evolves.
-          </i>
-        </p>
+      <main className="hero home-landing">
+        <section className="home-landing-panel" aria-labelledby="home-hero-title">
+          <div className="home-landing-content">
+            <h1 id="home-hero-title" className="hero-tagline">
+              A platform for correct AI-generated software.
+            </h1>
+            <p className="home-landing-copy">
+              AntiClodeX turns a product description into correct and maintainable AI-generated
+              software using natural-language specs, skills, visual preview, simulation, and formal methods.
+            </p>
+            <div className="home-landing-actions">
+              <button className="btn hero-cta" onClick={login}>Log In</button>
+            </div>
+          </div>
+          <ul className="home-landing-highlights" aria-label="Core capabilities">
+            <li className="home-highlight">
+              <p className="home-highlight-title">Structured engineering flow</p>
+              <p className="home-highlight-body">
+                Move from PRDs to executable specs, then generate the system by composing skills, checks, and
+                integrations.
+              </p>
+            </li>
+            <li className="home-highlight">
+              <p className="home-highlight-title">Visual preview and simulation</p>
+              <p className="home-highlight-body">Inspect behavior before implementation decisions become costly.</p>
+            </li>
+            <li className="home-highlight">
+              <div className="home-highlight-title-row">
+                <p className="home-highlight-title">Formal methods</p>
+                <span className="home-highlight-soon">Soon</span>
+              </div>
+              <p className="home-highlight-body">
+                Generate and verify software with formal methods so systems stay understandable and safe to evolve.
+              </p>
+            </li>
+          </ul>
+        </section>
       </main>
     );
   }
 
   return (
-    <main className="page">
-      <div className="page-header">
-        <h2 className="page-title">Projects</h2>
-        <button
-          className="btn-icon btn-icon-round"
-          onClick={() => setShowCreate(true)}
-          aria-label="New project"
-        >
-          <Plus size={16} />
-        </button>
-      </div>
-      {projects.length === 0 ? (
-        <p className="status-text">No projects yet</p>
+    <main className="page page-home">
+      <section className="home-overview" aria-label="Projects overview">
+        <div className="home-overview-main">
+          <p className="home-overview-eyebrow">Workspace</p>
+          <h1 className="page-title home-overview-title">Projects</h1>
+          <p className="home-overview-subtitle">
+            Explore active systems, review thread context, and start architecture work quickly.
+          </p>
+        </div>
+        <div className="home-overview-actions">
+          <button
+            className="btn home-overview-create"
+            onClick={() => setShowCreate(true)}
+            aria-label="Create new project"
+          >
+            <Plus size={16} aria-hidden="true" />
+            <span>New project</span>
+          </button>
+        </div>
+        <ul className="home-stats" aria-label="Project statistics">
+          <li className="home-stat">
+            <span className="home-stat-value">{projectCount}</span>
+            <span className="home-stat-label">Projects</span>
+          </li>
+          <li className="home-stat">
+            <span className="home-stat-value">{threadCount}</span>
+            <span className="home-stat-label">Threads</span>
+          </li>
+          <li className="home-stat">
+            <span className="home-stat-value">{publicProjectCount}</span>
+            <span className="home-stat-label">Public</span>
+          </li>
+          <li className="home-stat">
+            <span className="home-stat-value">{privateProjectCount}</span>
+            <span className="home-stat-label">Private</span>
+          </li>
+        </ul>
+      </section>
+
+      {projectCount === 0 ? (
+        <section className="home-empty" aria-live="polite">
+          <h2 className="home-empty-title">No projects yet</h2>
+          <p className="home-empty-body">
+            Create a project to define architecture concerns, run threads, and keep decisions auditable.
+          </p>
+          <button className="btn" onClick={() => setShowCreate(true)}>Create your first project</button>
+        </section>
       ) : (
-        <div className="project-grid">
-          {projects.map((p) => (
-            <Link key={p.id} to={`/${p.ownerHandle}/${p.name}`} className="project-card">
-              <div className="project-card-name">
-                {p.ownerHandle} / {p.name}
-              </div>
-              <span className="project-card-role">{p.accessRole} · {p.visibility}</span>
-              {p.threads.length > 0 && (
-                <ul className="project-card-threads">
-                  {p.threads.map((t) => (
-                    <li key={t.id}>
-                      {t.projectThreadId != null ? `#${t.projectThreadId} ` : ""}
-                      {t.title ?? "Untitled thread"}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </Link>
-          ))}
+        <div className="project-grid project-grid--home">
+          {projects.map((project) => {
+            const visibleThreads = project.threads.slice(0, THREAD_PREVIEW_COUNT);
+            const remainingThreadCount = Math.max(project.threads.length - THREAD_PREVIEW_COUNT, 0);
+            const description = project.description?.trim();
+            return (
+              <Link key={project.id} to={`/${project.ownerHandle}/${project.name}`} className="project-card project-card--home">
+                <div className="project-card-header">
+                  <div className="project-card-name-group">
+                    <p className="project-card-name">
+                      {project.ownerHandle} / {project.name}
+                    </p>
+                    <p className="project-card-description">
+                      {description?.length
+                        ? description
+                        : "No description yet. Open this project to document goals and architecture context."}
+                    </p>
+                  </div>
+                  <div className="project-card-badges" aria-label="Project metadata">
+                    <span className="project-badge">{project.accessRole}</span>
+                    <span className="project-badge project-badge--muted">{project.visibility}</span>
+                  </div>
+                </div>
+                <div className="project-card-thread-block">
+                  <p className="project-card-thread-title">Recent threads</p>
+                  {visibleThreads.length > 0 ? (
+                    <ul className="project-card-threads">
+                      {visibleThreads.map((thread) => (
+                        <li key={thread.id} className="project-card-thread-item">
+                          {thread.title ?? "Untitled thread"}
+                        </li>
+                      ))}
+                      {remainingThreadCount > 0 && (
+                        <li className="project-card-threads-more">{remainingThreadCount} more</li>
+                      )}
+                    </ul>
+                  ) : (
+                    <p className="project-card-threads-empty">No threads yet</p>
+                  )}
+                </div>
+              </Link>
+            );
+          })}
         </div>
       )}
       {showCreate && (

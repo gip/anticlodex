@@ -38,7 +38,7 @@ pnpm workspaces monorepo with four packages:
 
 ### Database
 - PostgreSQL, connected via `pg.Pool` in `apps/api/src/db.ts`
-- Single init script: `apps/api/src/migrations/001_init.sql` — `pnpm migrate` drops everything and recreates (dev-only)
+- Single init script: `apps/api/db/migrations/0001_init_full_schema.sql` — `pnpm migrate` drops everything and recreates (dev-only)
 - User upsert on `auth0_id` conflict in `apps/api/src/auth.ts`
 
 ### OpenShip Domain Model

@@ -1,0 +1,23 @@
+"id": "h.browser-user-agent"
+"kind": "Host"
+"name": "Browser User Agent"
+"parentId": "s.root"
+"metadata":
+  "openshipKey": "browser-user-agent"
+  "ownership": "third_party"
+  "boundary": "external"
+  "platform": "user-browser"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:3c4d03f0241462206213210bf6b3f92b483af3fabedf7586532b76f7328ae0ea"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:f35da2e98f4978e194528c2d20a1488a626d7f140f89dc0555b132c6363bc931"
+    "skillRefs": []
+"artifacts":
+  "Summary":
+    - "a.h.browser-user-agent.features.summary.v1"
+  "Docs":
+    - "a.h.browser-user-agent.specs.docs.v1"

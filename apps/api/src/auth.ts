@@ -1,10 +1,15 @@
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
-import type { FastifyRequest, FastifyReply } from "fastify";
-import { uniqueNamesGenerator, colors, animals } from "unique-names-generator";
+import type { FastifyReply, FastifyRequest } from "fastify";
+import { colors, uniqueNamesGenerator, animals } from "unique-names-generator";
+import { randomUUID } from "node:crypto";
 import { query } from "./db.js";
 
 interface Auth0Payload extends JWTPayload {
   sub: string;
+  scope?: string;
+  orgId?: string;
+  org_id?: string;
+  organization?: string;
 }
 
 interface UserRow {
@@ -27,6 +32,8 @@ export interface AuthUser {
   picture: string | null;
   handle: string;
   githubHandle: string | null;
+  orgId: string | null;
+  scope: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -37,7 +44,39 @@ declare module "fastify" {
   }
 }
 
-function mapRow(row: UserRow): AuthUser {
+function withProblem(
+  reply: FastifyReply,
+  status: number,
+  title: string,
+  detail: string,
+  instance?: string,
+) {
+  reply.code(status).type("application/problem+json").send({
+    type: "https://tools.ietf.org/html/rfc7807#section-3.1",
+    title,
+    status,
+    detail,
+    instance,
+  });
+}
+
+function extractOrgId(payload: Auth0Payload): string | null {
+  const candidates: Array<unknown> = [
+    payload.orgId,
+    payload.org_id,
+    payload.organization,
+    (payload as { [key: string]: unknown })["https://anticlodex.com/org_id"],
+    (payload as { [key: string]: unknown })["https://anticlodex.com/organization"],
+  ];
+
+  const first = candidates.find((value) => typeof value === "string");
+  if (typeof first !== "string") return null;
+
+  const normalized = first.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function mapRow(row: UserRow, scope: string | null, orgId: string | null): AuthUser {
   return {
     id: row.id,
     auth0Id: row.auth0_id,
@@ -46,6 +85,8 @@ function mapRow(row: UserRow): AuthUser {
     picture: row.picture,
     handle: row.handle,
     githubHandle: row.github_handle,
+    orgId,
+    scope,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -53,6 +94,16 @@ function mapRow(row: UserRow): AuthUser {
 
 function generateHandle(): string {
   return uniqueNamesGenerator({ dictionaries: [colors, animals], separator: "-" });
+}
+
+function toScope(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function deriveOrgId(orgId: string | null, fallbackUserOrg: string | null): string {
+  return orgId ?? fallbackUserOrg ?? randomUUID();
 }
 
 async function fetchUserProfile(
@@ -67,10 +118,12 @@ async function fetchUserProfile(
 }
 
 async function findOrCreateUser(domain: string, payload: Auth0Payload, token: string): Promise<AuthUser> {
-  const existing = await query<UserRow>("SELECT * FROM users WHERE auth0_id = $1", [payload.sub]);
+  const orgId = extractOrgId(payload);
+  const requestedScope = toScope(payload.scope);
 
+  const existing = await query<UserRow>("SELECT * FROM users WHERE auth0_id = $1", [payload.sub]);
   if (existing.rows.length > 0) {
-    return mapRow(existing.rows[0]);
+    return mapRow(existing.rows[0], requestedScope, orgId ?? null);
   }
 
   const profile = await fetchUserProfile(domain, token);
@@ -84,8 +137,8 @@ async function findOrCreateUser(domain: string, payload: Auth0Payload, token: st
 
     try {
       const result = await query<UserRow>(
-        `INSERT INTO users (auth0_id, email, name, picture, handle, github_handle, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, now())
+        `INSERT INTO users (id, auth0_id, email, name, picture, handle, github_handle, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, now())
          ON CONFLICT (auth0_id) DO UPDATE SET
            email = EXCLUDED.email,
            name = EXCLUDED.name,
@@ -93,14 +146,25 @@ async function findOrCreateUser(domain: string, payload: Auth0Payload, token: st
            github_handle = EXCLUDED.github_handle,
            updated_at = now()
          RETURNING *`,
-        [payload.sub, profile.email ?? null, profile.name ?? null, profile.picture ?? null, handle, githubHandle],
+        [
+          randomUUID(),
+          payload.sub,
+          profile.email ?? null,
+          profile.name ?? null,
+          profile.picture ?? null,
+          handle,
+          githubHandle,
+        ],
       );
 
-      return mapRow(result.rows[0]);
+      return mapRow(result.rows[0], requestedScope, orgId ?? null);
     } catch (err: unknown) {
       const isHandleConflict =
-        err instanceof Error && "code" in err && (err as { code: string }).code === "23505" &&
-        "constraint" in err && (err as { constraint: string }).constraint === "users_handle_key";
+        err instanceof Error &&
+        "code" in err &&
+        (err as { code: string }).code === "23505" &&
+        "constraint" in err &&
+        (err as { constraint: string }).constraint === "users_handle_key";
 
       if (!isHandleConflict || attempt === maxAttempts - 1) throw err;
     }
@@ -129,12 +193,12 @@ async function authenticateRequest(
   const header = req.headers.authorization;
   if (!header) {
     if (options.required) {
-      await reply.code(401).send({ error: "Missing or invalid Authorization header" });
+      withProblem(reply, 401, "Unauthorized", "Missing or invalid Authorization header", req.url);
     }
     return null;
   }
   if (!header.startsWith("Bearer ")) {
-    await reply.code(401).send({ error: "Missing or invalid Authorization header" });
+    withProblem(reply, 401, "Unauthorized", "Missing or invalid Authorization header", req.url);
     return null;
   }
 
@@ -146,7 +210,7 @@ async function authenticateRequest(
     auth0Payload = payload as Auth0Payload;
   } catch (err) {
     req.log.warn({ err }, "JWT verification failed");
-    await reply.code(401).send({ error: "Invalid token" });
+    withProblem(reply, 401, "Unauthorized", "Invalid bearer token", req.url);
     return null;
   }
 
@@ -155,7 +219,7 @@ async function authenticateRequest(
     return req.auth;
   } catch (err) {
     req.log.error({ err }, "User lookup/creation failed");
-    await reply.code(500).send({ error: "Internal server error" });
+    withProblem(reply, 500, "Internal Server Error", "User lookup or creation failed", req.url);
     return null;
   }
 }

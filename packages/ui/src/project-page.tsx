@@ -3,6 +3,7 @@ import { Settings } from "lucide-react";
 import { Link } from "./link";
 import { isFinalizedThreadStatus, type Project, type Thread } from "./home";
 import type { ThreadDetail } from "./thread-page";
+import { renderMarkdown } from "./markdown";
 
 interface MutationError {
   error: string;
@@ -12,11 +13,12 @@ type MutationResult<T> = T | MutationError | void;
 
 interface ProjectPageProps {
   project: Project;
-  fromThreadId?: number | null;
-  onCloseThread?: (threadProjectId: number) => Promise<MutationResult<{ thread: ThreadDetail }>>;
-  onCommitThread?: (threadProjectId: number) => Promise<MutationResult<{ thread: ThreadDetail }>>;
+  fromThreadId?: string | null;
+  onCloseThread?: (threadId: string) => Promise<MutationResult<{ thread: ThreadDetail }>>;
+  onCommitThread?: (threadId: string) => Promise<MutationResult<{ thread: ThreadDetail }>>;
+  onUpdateDescription?: (description: string | null) => Promise<MutationResult<{ description: string | null }>>;
   onCloneThread?: (
-    threadProjectId: number,
+    threadId: string,
     payload: {
       title: string;
       description: string;
@@ -38,7 +40,10 @@ function getErrorMessage<T>(result: MutationResult<T>): string | null {
   return null;
 }
 
-function flattenThreadTree(threads: Thread[], fromProjectThreadId?: number | null): Array<{ thread: Thread; depth: number }> {
+function flattenThreadTree(threads: Thread[], fromProjectThreadId?: string | null): Array<{ thread: Thread; depth: number }> {
+  const getThreadRouteId = (thread: Thread): string => (
+    thread.projectThreadId != null ? String(thread.projectThreadId) : thread.id
+  );
   const threadIds = new Set(threads.map((t) => t.id));
   const childrenMap = new Map<string, Thread[]>();
   const roots: Thread[] = [];
@@ -63,7 +68,7 @@ function flattenThreadTree(threads: Thread[], fromProjectThreadId?: number | nul
   }
 
   if (fromProjectThreadId != null) {
-    const startThread = threads.find((t) => t.projectThreadId === fromProjectThreadId);
+    const startThread = threads.find((t) => getThreadRouteId(t) === fromProjectThreadId);
     if (startThread) {
       walk([startThread], 0);
       return result;
@@ -74,7 +79,14 @@ function flattenThreadTree(threads: Thread[], fromProjectThreadId?: number | nul
   return result;
 }
 
-export function ProjectPage({ project, fromThreadId, onCloseThread, onCommitThread, onCloneThread }: ProjectPageProps) {
+export function ProjectPage({
+  project,
+  fromThreadId,
+  onCloseThread,
+  onCommitThread,
+  onUpdateDescription,
+  onCloneThread,
+}: ProjectPageProps) {
   const [cloningThreadId, setCloningThreadId] = useState<string | null>(null);
   const [threadTransitionThreadId, setThreadTransitionThreadId] = useState<string | null>(null);
   const [threadTransitionAction, setThreadTransitionAction] = useState<"close" | "commit" | null>(null);
@@ -85,6 +97,33 @@ export function ProjectPage({ project, fromThreadId, onCloseThread, onCommitThre
   const [cloneThreadDescription, setCloneThreadDescription] = useState("");
   const [isSubmittingClone, setIsSubmittingClone] = useState(false);
   const canCloneThreads = project.accessRole === "Owner" || project.accessRole === "Editor";
+  const canEditDescription = (project.accessRole === "Owner" || project.accessRole === "Editor") && !!onUpdateDescription;
+  const [isDescriptionEditing, setIsDescriptionEditing] = useState(false);
+  const [descriptionTab, setDescriptionTab] = useState<"write" | "preview">("write");
+  const [descriptionDraft, setDescriptionDraft] = useState(project.description ?? "");
+  const [descriptionError, setDescriptionError] = useState("");
+  const [isSavingDescription, setIsSavingDescription] = useState(false);
+
+  async function handleSaveDescription() {
+    if (!onUpdateDescription) return;
+    setDescriptionError("");
+    setIsSavingDescription(true);
+    const nextDescription = descriptionDraft.trim() ? descriptionDraft.trim() : null;
+    try {
+      const result = await onUpdateDescription(nextDescription);
+      const error = getErrorMessage(result);
+      if (error) {
+        setDescriptionError(error);
+        return;
+      }
+      setDescriptionDraft(nextDescription ?? "");
+      setIsDescriptionEditing(false);
+    } catch {
+      setDescriptionError("Failed to update project description");
+    } finally {
+      setIsSavingDescription(false);
+    }
+  }
 
   return (
     <main className="page">
@@ -101,9 +140,91 @@ export function ProjectPage({ project, fromThreadId, onCloseThread, onCommitThre
         </div>
       </div>
 
-      {project.description && (
-        <p className="page-description">{project.description}</p>
-      )}
+      <section className="project-description-card">
+        {isDescriptionEditing ? (
+          <div className="project-description-editor">
+            <div className="md-tabs">
+              <button
+                type="button"
+                className={`md-tab${descriptionTab === "write" ? " md-tab--active" : ""}`}
+                onClick={() => setDescriptionTab("write")}
+              >
+                Write
+              </button>
+              <button
+                type="button"
+                className={`md-tab${descriptionTab === "preview" ? " md-tab--active" : ""}`}
+                onClick={() => setDescriptionTab("preview")}
+              >
+                Preview
+              </button>
+            </div>
+            {descriptionTab === "write" ? (
+              <textarea
+                className="field-input field-textarea md-textarea"
+                rows={8}
+                value={descriptionDraft}
+                onChange={(event) => setDescriptionDraft(event.target.value)}
+                placeholder="Add a project description (Markdown supported)"
+              />
+            ) : (
+              <div className="md-preview">
+                {descriptionDraft.trim() ? (
+                  <div className="md-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(descriptionDraft) }} />
+                ) : (
+                  <p className="project-description-empty">Nothing to preview</p>
+                )}
+              </div>
+            )}
+            {descriptionError && <p className="field-error">{descriptionError}</p>}
+            <div className="thread-inline-actions">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => {
+                  setDescriptionDraft(project.description ?? "");
+                  setDescriptionError("");
+                  setDescriptionTab("write");
+                  setIsDescriptionEditing(false);
+                }}
+              >
+                Cancel
+              </button>
+              <button type="button" className="btn" disabled={isSavingDescription} onClick={handleSaveDescription}>
+                {isSavingDescription ? "Saving..." : "Save"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="project-description-display">
+            <div className="project-description-content">
+              {project.description ? (
+                <div className="md-body project-description-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(project.description) }} />
+              ) : (
+                <p className="project-description-empty">
+                  {canEditDescription
+                    ? <em>No description yet. Click Edit to add one.</em>
+                    : "No description provided yet."}
+                </p>
+              )}
+            </div>
+            {canEditDescription && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => {
+                  setDescriptionDraft(project.description ?? "");
+                  setDescriptionError("");
+                  setDescriptionTab("write");
+                  setIsDescriptionEditing(true);
+                }}
+              >
+                Edit
+              </button>
+            )}
+          </div>
+        )}
+      </section>
 
       <section className="thread-section">
         <h3 className="thread-section-title">Threads</h3>
@@ -121,132 +242,135 @@ export function ProjectPage({ project, fromThreadId, onCloseThread, onCommitThre
                 </p>
               )}
               <div className="thread-list">
-                {flatThreads.map(({ thread: t, depth }) => (
-              <Link
-                key={t.id}
-                to={`/${project.ownerHandle}/${project.name}/thread/${t.projectThreadId}`}
-                className={`thread-row${depth > 0 ? " thread-row--nested" : ""}`}
-                style={depth > 0 ? { paddingLeft: `${16 + depth * 24}px` } : undefined}
-              >
-                <span className="thread-row-main">
-                  <span className="thread-row-id">#{t.projectThreadId}</span>
-                  <span className="thread-row-title">{t.title ?? "Untitled"}</span>
-                  {(project.accessRole === "Owner" || project.accessRole === "Editor") && t.status === "open" && onCloseThread && onCommitThread && (
-                    <>
-                      <button
-                        className="btn btn-secondary thread-row-action-button"
-                        type="button"
-                        disabled={threadTransitionThreadId === t.id}
-                        onClick={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          if (typeof t.projectThreadId !== "number") return;
-                          const threadProjectId = t.projectThreadId;
-                          const threadId = t.id;
-                          setThreadTransitionThreadId(threadId);
-                          setThreadTransitionAction("close");
-                          setThreadTransitionErrors((prev) => {
-                            const next = { ...prev };
-                            delete next[threadId];
-                            return next;
-                          });
-                          (async () => {
-                            try {
-                              const result = await onCloseThread(threadProjectId);
-                              const error = getErrorMessage(result);
-                              if (error) {
-                                setThreadTransitionErrors((prev) => ({ ...prev, [threadId]: error }));
-                              }
-                            } catch {
-                              setThreadTransitionErrors((prev) => ({ ...prev, [threadId]: "Failed to close thread" }));
-                            } finally {
-                              setThreadTransitionThreadId((current) => (current === threadId ? null : current));
-                              setThreadTransitionAction(null);
-                            }
-                          })();
-                        }}
-                      >
-                        {threadTransitionThreadId === t.id && threadTransitionAction === "close"
-                          ? "Closing…"
-                          : "Close"}
-                      </button>
-                      <button
-                        className="btn thread-row-action-button"
-                        type="button"
-                        disabled={threadTransitionThreadId === t.id}
-                        onClick={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          if (typeof t.projectThreadId !== "number") return;
-                          const threadProjectId = t.projectThreadId;
-                          const threadId = t.id;
-                          setThreadTransitionThreadId(threadId);
-                          setThreadTransitionAction("commit");
-                          setThreadTransitionErrors((prev) => {
-                            const next = { ...prev };
-                            delete next[threadId];
-                            return next;
-                          });
-                          (async () => {
-                            try {
-                              const result = await onCommitThread(threadProjectId);
-                              const error = getErrorMessage(result);
-                              if (error) {
-                                setThreadTransitionErrors((prev) => ({ ...prev, [threadId]: error }));
-                              }
-                            } catch {
-                              setThreadTransitionErrors((prev) => ({ ...prev, [threadId]: "Failed to commit thread" }));
-                            } finally {
-                              setThreadTransitionThreadId((current) => (current === threadId ? null : current));
-                              setThreadTransitionAction(null);
-                            }
-                          })();
-                        }}
-                      >
-                        {threadTransitionThreadId === t.id && threadTransitionAction === "commit"
-                          ? "Committing…"
-                          : "Commit"}
-                      </button>
-                    </>
-                  )}
-                  {canCloneThreads && isFinalizedThreadStatus(t.status) && onCloneThread && (
-                    <button
-                      className="btn btn-secondary thread-row-action-button thread-row-clone-action"
-                      type="button"
-                      disabled={cloningThreadId === t.id}
-                      onClick={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        setCloneThreadDraft(t);
-                        setCloneThreadTitle(t.title ?? "");
-                        setCloneThreadDescription(t.description ?? "");
-                        setCloneErrors((prev) => {
-                          const next = { ...prev };
-                          delete next[t.id];
-                          return next;
-                        });
-                      }}
+                {flatThreads.map(({ thread: t, depth }) => {
+                  const threadRouteId = t.projectThreadId != null ? String(t.projectThreadId) : t.id;
+                  const threadDisplayId = t.projectThreadId != null ? threadRouteId : t.id.slice(0, 8);
+
+                  return (
+                    <Link
+                      key={t.id}
+                      to={`/${project.ownerHandle}/${project.name}/thread/${threadRouteId}`}
+                      className={`thread-row${depth > 0 ? " thread-row--nested" : ""}`}
+                      style={depth > 0 ? { paddingLeft: `${16 + depth * 24}px` } : undefined}
                     >
-                      {cloningThreadId === t.id ? "Creating…" : "New Thread"}
-                    </button>
-                  )}
-                  <span className={`thread-status thread-status--${t.status === "committed" ? "committed" : t.status} thread-row-status`}>
-                    {t.status === "open" ? "Open" : t.status === "closed" ? "Closed" : t.status}
-                  </span>
-                  <span className="thread-row-date">{formatDate(t.updatedAt)}</span>
-                </span>
-                {cloneErrors[t.id] && (
-                  <span className="thread-row-actions thread-row-error">
-                    <p className="field-error">{cloneErrors[t.id]}</p>
-                  </span>
-                )}
-                {threadTransitionErrors[t.id] && (
-                  <span className="thread-row-actions thread-row-error">
-                    <p className="field-error">{threadTransitionErrors[t.id]}</p>
-                  </span>
-                )}
-              </Link>
-            ))}
+                      <span className="thread-row-main">
+                        <span className="thread-row-id">#{threadDisplayId}</span>
+                        <span className="thread-row-title">{t.title ?? "Untitled"}</span>
+                        {(project.accessRole === "Owner" || project.accessRole === "Editor") && t.status === "open" && onCloseThread && onCommitThread && (
+                          <>
+                            <button
+                              className="btn btn-secondary thread-row-action-button"
+                              type="button"
+                              disabled={threadTransitionThreadId === t.id}
+                              onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                const threadProjectId = t.id;
+                                const threadId = t.id;
+                                setThreadTransitionThreadId(threadId);
+                                setThreadTransitionAction("close");
+                                setThreadTransitionErrors((prev) => {
+                                  const next = { ...prev };
+                                  delete next[threadId];
+                                  return next;
+                                });
+                                (async () => {
+                                  try {
+                                    const result = await onCloseThread(threadProjectId);
+                                    const error = getErrorMessage(result);
+                                    if (error) {
+                                      setThreadTransitionErrors((prev) => ({ ...prev, [threadId]: error }));
+                                    }
+                                  } catch {
+                                    setThreadTransitionErrors((prev) => ({ ...prev, [threadId]: "Failed to close thread" }));
+                                  } finally {
+                                    setThreadTransitionThreadId((current) => (current === threadId ? null : current));
+                                    setThreadTransitionAction(null);
+                                  }
+                                })();
+                              }}
+                            >
+                              {threadTransitionThreadId === t.id && threadTransitionAction === "close"
+                                ? "Closing…"
+                                : "Close"}
+                            </button>
+                            <button
+                              className="btn thread-row-action-button"
+                              type="button"
+                              disabled={threadTransitionThreadId === t.id}
+                              onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                const threadProjectId = t.id;
+                                const threadId = t.id;
+                                setThreadTransitionThreadId(threadId);
+                                setThreadTransitionAction("commit");
+                                setThreadTransitionErrors((prev) => {
+                                  const next = { ...prev };
+                                  delete next[threadId];
+                                  return next;
+                                });
+                                (async () => {
+                                  try {
+                                    const result = await onCommitThread(threadProjectId);
+                                    const error = getErrorMessage(result);
+                                    if (error) {
+                                      setThreadTransitionErrors((prev) => ({ ...prev, [threadId]: error }));
+                                    }
+                                  } catch {
+                                    setThreadTransitionErrors((prev) => ({ ...prev, [threadId]: "Failed to commit thread" }));
+                                  } finally {
+                                    setThreadTransitionThreadId((current) => (current === threadId ? null : current));
+                                    setThreadTransitionAction(null);
+                                  }
+                                })();
+                              }}
+                            >
+                              {threadTransitionThreadId === t.id && threadTransitionAction === "commit"
+                                ? "Committing…"
+                                : "Commit"}
+                            </button>
+                          </>
+                        )}
+                        {canCloneThreads && isFinalizedThreadStatus(t.status) && onCloneThread && (
+                          <button
+                            className="btn btn-secondary thread-row-action-button thread-row-clone-action"
+                            type="button"
+                            disabled={cloningThreadId === t.id}
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              setCloneThreadDraft(t);
+                              setCloneThreadTitle(t.title ?? "");
+                              setCloneThreadDescription(t.description ?? "");
+                              setCloneErrors((prev) => {
+                                const next = { ...prev };
+                                delete next[t.id];
+                                return next;
+                              });
+                            }}
+                          >
+                            {cloningThreadId === t.id ? "Creating…" : "New Thread"}
+                          </button>
+                        )}
+                        <span className={`thread-status thread-status--${t.status === "committed" ? "committed" : t.status} thread-row-status`}>
+                          {t.status === "open" ? "Open" : t.status === "closed" ? "Closed" : t.status}
+                        </span>
+                        <span className="thread-row-date">{formatDate(t.updatedAt)}</span>
+                      </span>
+                      {cloneErrors[t.id] && (
+                        <span className="thread-row-actions thread-row-error">
+                          <p className="field-error">{cloneErrors[t.id]}</p>
+                        </span>
+                      )}
+                      {threadTransitionErrors[t.id] && (
+                        <span className="thread-row-actions thread-row-error">
+                          <p className="field-error">{threadTransitionErrors[t.id]}</p>
+                        </span>
+                      )}
+                    </Link>
+                  );
+                })}
               </div>
             </>
           );
@@ -300,7 +424,7 @@ export function ProjectPage({ project, fromThreadId, onCloseThread, onCommitThre
                 disabled={isSubmittingClone || !cloneThreadTitle.trim()}
                 onClick={async () => {
                   const draft = cloneThreadDraft;
-                  if (!draft || typeof draft.projectThreadId !== "number") return;
+                  if (!draft) return;
                   const title = cloneThreadTitle.trim();
                   const description = cloneThreadDescription.trim();
                   if (!title) return;
@@ -312,7 +436,7 @@ export function ProjectPage({ project, fromThreadId, onCloseThread, onCommitThre
                     return next;
                   });
                   try {
-                    const result = await onCloneThread(draft.projectThreadId, {
+                    const result = await onCloneThread(draft.id, {
                       title,
                       description,
                     });

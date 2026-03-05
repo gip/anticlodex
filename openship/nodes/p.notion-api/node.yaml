@@ -1,0 +1,31 @@
+"id": "p.notion-api"
+"kind": "Process"
+"name": "Notion API Process"
+"parentId": "h.notion-platform"
+"metadata":
+  "openshipKey": "notion-api"
+  "ownership": "third_party"
+  "boundary": "external"
+  "runtime": "notion-rest-api"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:850110e9a3b9a6ba6f9e73b81378d45549297aca370a560ba8da1b97d901396c"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:9b0151bb49a0fd7fe2aad0f76d3a2eb5af681d6c25be186e9c3be49cc45d78f9"
+    "skillRefs": []
+  "Interfaces":
+    "documentRefs":
+      - "sha256:f200ca780fdd3eaa75575d25d65aa423a7c39d3fba592e28d8f4f41e13bac626"
+    "skillRefs": []
+  "Security":
+    "documentRefs":
+      - "sha256:2dda5749ab774da1032325ddb664fd1d168fa72b47d2712f27d55e44070475c6"
+    "skillRefs": []
+"artifacts":
+  "Summary":
+    - "a.p.notion-api.features.summary.v1"
+  "Docs":
+    - "a.p.notion-api.specs.docs.v1"

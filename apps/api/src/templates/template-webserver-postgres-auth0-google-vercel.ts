@@ -9,6 +9,10 @@ export const templateWebserverPostgresAuth0GoogleVercel: TemplateDefinition = {
       key: "browser_host",
       name: "Browser",
       kind: "Host",
+      metadata: {
+        ownership: "third_party",
+        boundary: "external",
+      },
       parentKey: "root",
       layout: {
         x: 0,
@@ -17,8 +21,12 @@ export const templateWebserverPostgresAuth0GoogleVercel: TemplateDefinition = {
     },
     {
       key: "react_frontend",
-      name: "React App",
+      name: "Frontend (React)",
       kind: "Process",
+      metadata: {
+        ownership: "first_party",
+        boundary: "external",
+      },
       parentKey: "browser_host",
       layout: {
         x: 80,
@@ -29,6 +37,10 @@ export const templateWebserverPostgresAuth0GoogleVercel: TemplateDefinition = {
       key: "vercel_host",
       name: "Vercel",
       kind: "Host",
+      metadata: {
+        ownership: "third_party",
+        boundary: "external",
+      },
       parentKey: "root",
       layout: {
         x: 300,
@@ -37,8 +49,12 @@ export const templateWebserverPostgresAuth0GoogleVercel: TemplateDefinition = {
     },
     {
       key: "webserver_process",
-      name: "Webserver",
+      name: "Backend (Vercel)",
       kind: "Process",
+      metadata: {
+        ownership: "first_party",
+        boundary: "external",
+      },
       parentKey: "vercel_host",
       layout: {
         x: 380,
@@ -47,8 +63,12 @@ export const templateWebserverPostgresAuth0GoogleVercel: TemplateDefinition = {
     },
     {
       key: "postgres_host",
-      name: "Postgres Host",
+      name: "Postgres Runtime",
       kind: "Host",
+      metadata: {
+        ownership: "first_party",
+        boundary: "internal",
+      },
       parentKey: "root",
       layout: {
         x: 620,
@@ -59,6 +79,10 @@ export const templateWebserverPostgresAuth0GoogleVercel: TemplateDefinition = {
       key: "postgres_process",
       name: "Postgres",
       kind: "Process",
+      metadata: {
+        ownership: "first_party",
+        boundary: "internal",
+      },
       parentKey: "postgres_host",
       layout: {
         x: 700,
@@ -67,8 +91,12 @@ export const templateWebserverPostgresAuth0GoogleVercel: TemplateDefinition = {
     },
     {
       key: "auth0_host",
-      name: "Auth0 Identity",
+      name: "Auth0",
       kind: "Host",
+      metadata: {
+        ownership: "third_party",
+        boundary: "external",
+      },
       parentKey: "root",
       layout: {
         x: 620,
@@ -79,6 +107,10 @@ export const templateWebserverPostgresAuth0GoogleVercel: TemplateDefinition = {
       key: "auth0_process",
       name: "Auth0 Service",
       kind: "Process",
+      metadata: {
+        ownership: "third_party",
+        boundary: "external",
+      },
       parentKey: "auth0_host",
       layout: {
         x: 700,
@@ -89,6 +121,10 @@ export const templateWebserverPostgresAuth0GoogleVercel: TemplateDefinition = {
       key: "google_host",
       name: "Google Identity",
       kind: "Host",
+      metadata: {
+        ownership: "third_party",
+        boundary: "external",
+      },
       parentKey: "root",
       layout: {
         x: 900,
@@ -99,6 +135,10 @@ export const templateWebserverPostgresAuth0GoogleVercel: TemplateDefinition = {
       key: "google_oauth_process",
       name: "Google OAuth",
       kind: "Process",
+      metadata: {
+        ownership: "third_party",
+        boundary: "external",
+      },
       parentKey: "google_host",
       layout: {
         x: 980,
@@ -197,7 +237,7 @@ export const templateWebserverPostgresAuth0GoogleVercel: TemplateDefinition = {
       title: "Stack overview",
       language: "en",
       text:
-        "The system is composed of host-wrapped runtime components: Browser/React frontend, Vercel/Webserver backend, Postgres Host/Postgres database, Auth0 Identity/Auth0 Service, and Google Identity/Google OAuth.",
+        "The system is composed of host-wrapped runtime components: Browser/Frontend (React), Vercel/Backend (Vercel), Postgres Runtime/Postgres, Auth0/Auth0 Service, and Google Identity/Google OAuth.",
     },
     {
       key: "spec_browser_host",
@@ -221,15 +261,15 @@ export const templateWebserverPostgresAuth0GoogleVercel: TemplateDefinition = {
       title: "Vercel host",
       language: "en",
       text:
-        "Vercel hosts the webserver process and provides deployment lifecycle controls, public HTTPS ingress, and runtime isolation.",
+        "Vercel is a third-party host that runs the first-party backend process and provides deployment lifecycle controls, public HTTPS ingress, and runtime isolation.",
     },
     {
       key: "spec_webserver_process",
       kind: "Document",
-      title: "Webserver process",
+      title: "Backend process",
       language: "en",
       text:
-        "The webserver process serves backend APIs consumed by the frontend over HTTPS and reads/writes persistent records in Postgres over PG Wire.",
+        "The first-party backend process serves APIs consumed by the frontend over HTTPS and reads/writes persistent records in Postgres over PG Wire.",
     },
     {
       key: "spec_postgres_host",
@@ -237,7 +277,7 @@ export const templateWebserverPostgresAuth0GoogleVercel: TemplateDefinition = {
       title: "Postgres host",
       language: "en",
       text:
-        "Postgres Host encapsulates database runtime concerns including process isolation, network exposure, and operational configuration for persistence.",
+        "Postgres Runtime encapsulates database runtime concerns including process isolation, network exposure, and operational configuration for persistence.",
     },
     {
       key: "spec_postgres_process",
@@ -253,7 +293,7 @@ export const templateWebserverPostgresAuth0GoogleVercel: TemplateDefinition = {
       title: "Auth0 identity host",
       language: "en",
       text:
-        "Auth0 Identity provides the managed identity boundary that encapsulates OAuth/OIDC flows and token management capabilities.",
+        "Auth0 provides the managed identity boundary that encapsulates OAuth/OIDC flows and token management capabilities.",
     },
     {
       key: "spec_auth0_process",

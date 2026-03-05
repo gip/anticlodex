@@ -1,4 +1,4 @@
--- StaffX full schema init (dev-only, destructive)
+-- AntiClodeX full schema init (dev-only, destructive)
 -- Order: users → openship core → projects → threads
 
 create extension if not exists pgcrypto;
@@ -23,13 +23,65 @@ create table if not exists users (
 -- OPENSHIP ENUMS
 -- ============================================================
 
-create type node_kind as enum ('Root', 'Host', 'Container', 'Process', 'Library');
-create type edge_type as enum ('Runtime', 'Dataflow', 'Dependency');
-create type doc_kind as enum ('Document', 'Skill', 'Prompt');
-create type ref_type as enum ('Document', 'Skill', 'Prompt');
-create type provider as enum ('notion', 'google');
-create type doc_source_type as enum ('local', 'notion', 'google_doc');
-create type artifact_type as enum ('Summary', 'Code', 'Docs');
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where t.typname = 'node_kind' and n.nspname = current_schema()
+  ) then
+    create type node_kind as enum ('Root', 'Host', 'Container', 'Process', 'Library');
+  end if;
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where t.typname = 'edge_type' and n.nspname = current_schema()
+  ) then
+    create type edge_type as enum ('Runtime', 'Dataflow', 'Dependency');
+  end if;
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where t.typname = 'doc_kind' and n.nspname = current_schema()
+  ) then
+    create type doc_kind as enum ('Document', 'Skill', 'Prompt');
+  end if;
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where t.typname = 'ref_type' and n.nspname = current_schema()
+  ) then
+    create type ref_type as enum ('Document', 'Skill', 'Prompt');
+  end if;
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where t.typname = 'provider' and n.nspname = current_schema()
+  ) then
+    create type provider as enum ('notion', 'google');
+  end if;
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where t.typname = 'doc_source_type' and n.nspname = current_schema()
+  ) then
+    create type doc_source_type as enum ('local', 'notion', 'google_doc');
+  end if;
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where t.typname = 'artifact_type' and n.nspname = current_schema()
+  ) then
+    create type artifact_type as enum ('Summary', 'Code', 'Docs');
+  end if;
+end $$;
 
 -- ============================================================
 -- SYSTEMS
@@ -241,8 +293,25 @@ create index idx_artifact_files_hash on artifact_files (file_hash);
 -- PROJECTS
 -- ============================================================
 
-create type collaborator_role as enum ('Editor', 'Viewer');
-create type project_visibility as enum ('public', 'private');
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where t.typname = 'collaborator_role' and n.nspname = current_schema()
+  ) then
+    create type collaborator_role as enum ('Editor', 'Viewer');
+  end if;
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where t.typname = 'project_visibility' and n.nspname = current_schema()
+  ) then
+    create type project_visibility as enum ('public', 'private');
+  end if;
+end $$;
 
 create table projects (
   id          text primary key,
@@ -250,6 +319,7 @@ create table projects (
   description text,
   visibility  project_visibility not null default 'private',
   owner_id    uuid not null references users(id),
+  is_archived boolean not null default false,
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now()
 );
@@ -292,18 +362,68 @@ create index idx_member_roles_role on project_member_roles (project_id, role_nam
 -- THREADS
 -- ============================================================
 
-create type action_type as enum ('Chat', 'Edit', 'Import', 'Plan', 'PlanResponse', 'Execute', 'ExecuteResponse', 'Update');
-create type message_role as enum ('User', 'Assistant', 'System');
-create type change_operation as enum ('Create', 'Update', 'Delete');
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where t.typname = 'action_type' and n.nspname = current_schema()
+  ) then
+    create type action_type as enum (
+      'Chat',
+      'Edit',
+      'Import',
+      'Plan',
+      'PlanResponse',
+      'Execute',
+      'ExecuteResponse',
+      'Update'
+    );
+  end if;
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where t.typname = 'message_role' and n.nspname = current_schema()
+  ) then
+    create type message_role as enum ('User', 'Assistant', 'System');
+  end if;
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where t.typname = 'change_operation' and n.nspname = current_schema()
+  ) then
+    create type change_operation as enum ('Create', 'Update', 'Delete');
+  end if;
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where t.typname = 'acx_event_type' and n.nspname = current_schema()
+  ) then
+    create type acx_event_type as enum (
+      'chat.session.finished',
+      'assistant.run.started',
+      'assistant.run.progress',
+      'assistant.run.waiting_input',
+      'assistant.run.completed',
+      'assistant.run.failed',
+      'assistant.run.cancelled',
+      'thread.matrix.changed'
+    );
+  end if;
+end $$;
 
 create table threads (
   id               text primary key,
   title            text,
   description      text,
-  project_thread_id int check (project_thread_id > 0),
   project_id       text not null references projects(id) on delete cascade,
   created_by       uuid not null references users(id),
   seed_system_id   text not null references systems(id),
+  project_thread_id integer not null,
   source_thread_id text references threads(id),
   status           text not null default 'open'
     check (status in ('open', 'closed', 'committed')),
@@ -312,18 +432,12 @@ create table threads (
 );
 
 create index idx_threads_project on threads (project_id);
-create unique index idx_threads_project_thread_id
-  on threads (project_id, project_thread_id)
-  where project_thread_id is not null;
+create unique index idx_threads_project_project_thread_id on threads (project_id, project_thread_id);
+create index idx_threads_project_thread_id on threads (project_thread_id);
 create index idx_threads_created_by on threads (created_by);
 create index idx_threads_seed on threads (seed_system_id);
 create index idx_threads_source on threads (source_thread_id) where source_thread_id is not null;
 create index idx_threads_status on threads (status);
-
-create table project_thread_counters (
-  project_id      text primary key references projects(id) on delete cascade,
-  next_thread_id  integer not null check (next_thread_id > 0)
-);
 
 -- ============================================================
 -- ACTIONS
@@ -392,6 +506,7 @@ create table if not exists agent_runs (
   thread_id text not null references threads(id) on delete cascade,
   project_id text not null references projects(id) on delete cascade,
   requested_by_user_id uuid references users(id) on delete set null,
+  model text not null default 'claude-opus-4-6' check (model in ('claude-opus-4-6', 'claude-sonnet-4-6', 'codex-5.3')),
   mode text not null check (mode in ('direct', 'plan')),
   plan_action_id text,
   chat_message_id text,
@@ -412,6 +527,25 @@ create table if not exists agent_runs (
 create index idx_agent_runs_status_created on agent_runs (status, created_at);
 create unique index uq_agent_runs_thread_active on agent_runs (thread_id)
   where status = 'running';
+
+create table if not exists acx_events (
+  id            uuid primary key default gen_random_uuid(),
+  type          acx_event_type not null,
+  aggregate_type text not null,
+  aggregate_id   text not null,
+  org_id        text,
+  trace_id      text,
+  payload       jsonb not null default '{}'::jsonb,
+  version       int not null default 1,
+  occurred_at   timestamptz not null default now(),
+  created_at    timestamptz not null default now(),
+  constraint acx_events_version_check check (version > 0)
+);
+
+create index idx_acx_events_org_aggregate on acx_events (org_id, aggregate_type, aggregate_id);
+create index idx_acx_events_org_occurred on acx_events (org_id, occurred_at, id);
+create index idx_acx_events_aggregate_occurred on acx_events (aggregate_type, aggregate_id, occurred_at, id);
+create index idx_acx_events_occurred on acx_events (occurred_at, id);
 
 -- ============================================================
 -- FUNCTIONS
@@ -571,33 +705,27 @@ returns text as $$
   );
 $$ language sql stable;
 
-create or replace function next_project_thread_id(p_project_id text)
-returns integer as $$
+create or replace function next_project_thread_id(
+  p_project_id text
+) returns integer as $$
 declare
-  v_allocated_id integer;
+  v_project_thread_id integer;
 begin
-  insert into project_thread_counters (project_id, next_thread_id)
-  values (p_project_id, 2)
-  on conflict (project_id) do update
-    set next_thread_id = project_thread_counters.next_thread_id + 1
-  returning next_thread_id - 1 into v_allocated_id;
+  perform 1
+  from projects p
+  where p.id = p_project_id
+  for update;
 
-  return v_allocated_id;
-end;
-$$ language plpgsql;
-
-create or replace function assign_project_thread_id()
-returns trigger as $$
-begin
-  if new.title is null or btrim(new.title) = '' then
-    raise exception 'Thread title is required';
+  if not found then
+    raise exception 'Project % not found', p_project_id;
   end if;
 
-  if new.project_thread_id is null then
-    new.project_thread_id := next_project_thread_id(new.project_id);
-  end if;
+  select coalesce(max(t.project_thread_id), 0) + 1
+  into v_project_thread_id
+  from threads t
+  where t.project_id = p_project_id;
 
-  return new;
+  return v_project_thread_id;
 end;
 $$ language plpgsql;
 
@@ -609,9 +737,13 @@ create or replace function create_thread(
   p_title text,
   p_description text default null
 ) returns text as $$
+declare
+  v_project_thread_id integer;
 begin
-  insert into threads (id, title, description, project_id, created_by, seed_system_id, status)
-  values (p_thread_id, p_title, p_description, p_project_id, p_created_by, p_seed_system_id, 'open');
+  v_project_thread_id := next_project_thread_id(p_project_id);
+
+  insert into threads (id, title, description, project_id, created_by, seed_system_id, project_thread_id, status)
+  values (p_thread_id, p_title, p_description, p_project_id, p_created_by, p_seed_system_id, v_project_thread_id, 'open');
 
   return p_thread_id;
 end;
@@ -627,11 +759,13 @@ create or replace function clone_thread(
 ) returns text as $$
 declare
   v_current_system text;
+  v_project_thread_id integer;
 begin
   v_current_system := thread_current_system(p_source_thread_id);
+  v_project_thread_id := next_project_thread_id(p_project_id);
 
-  insert into threads (id, title, description, project_id, created_by, seed_system_id, source_thread_id, status)
-  values (p_new_thread_id, p_title, p_description, p_project_id, p_created_by, v_current_system, p_source_thread_id, 'open');
+  insert into threads (id, title, description, project_id, created_by, seed_system_id, project_thread_id, source_thread_id, status)
+  values (p_new_thread_id, p_title, p_description, p_project_id, p_created_by, v_current_system, v_project_thread_id, p_source_thread_id, 'open');
 
   return p_new_thread_id;
 end;
@@ -766,9 +900,6 @@ create trigger trg_edges_updated     before update on edges     for each row exe
 create trigger trg_artifacts_updated before update on artifacts for each row execute function set_updated_at();
 create trigger trg_projects_updated  before update on projects  for each row execute function set_updated_at();
 create trigger trg_threads_updated   before update on threads   for each row execute function set_updated_at();
-create trigger trg_threads_assign_project_thread_id
-  before insert on threads
-  for each row execute function assign_project_thread_id();
 create constraint trigger trg_validate_system_root_on_systems
   after insert or update of id, root_node_id on systems
   deferrable initially deferred
@@ -861,7 +992,7 @@ from actions a
 join threads t on t.id = a.thread_id
 order by a.thread_id, a.position;
 
-create view project_summary as
+create or replace view project_summary as
 select
   p.id,
   p.name,

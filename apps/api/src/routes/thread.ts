@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
-import { AgentRunPlanChange } from "@staffx/agent-runtime";
+import { AgentRunPlanChange } from "@acx/agent-runtime";
 import pool, { query } from "../db.js";
 import {
   applyOpenShipBundleToThreadSystem,
@@ -24,15 +24,26 @@ import { generateOpenShipFileBundle } from "../agent-runner.js";
 
 const EDIT_ROLES = new Set(["Owner", "Editor"]);
 const SYSTEM_PROMPT_CONCERN = "__system_prompt__";
+type NodeOwnership = "first_party" | "third_party";
+type NodeBoundary = "internal" | "external";
+
+function normalizeNodeOwnership(value: string | null): NodeOwnership {
+  return value === "third_party" ? "third_party" : "first_party";
+}
+
+function normalizeNodeBoundary(value: string | null): NodeBoundary {
+  return value === "external" ? "external" : "internal";
+}
+
 function parsePositiveMs(value: string, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-const AGENT_RUN_TIMEOUT_MS = parsePositiveMs(process.env.STAFFX_AGENT_RUN_TIMEOUT_MS ?? "120000", 120000);
-const AGENT_RUN_POLL_MS = parsePositiveMs(process.env.STAFFX_AGENT_RUN_POLL_MS ?? "700", 700);
-const AGENT_RUN_SLOT_WAIT_MS = parsePositiveMs(process.env.STAFFX_AGENT_RUN_SLOT_WAIT_MS ?? "120000", 120000);
-const AGENT_RUN_ENQUEUE_POLL_MS = parsePositiveMs(process.env.STAFFX_AGENT_RUN_ENQUEUE_POLL_MS ?? "500", 500);
+const AGENT_RUN_TIMEOUT_MS = parsePositiveMs(process.env.ACX_AGENT_RUN_TIMEOUT_MS ?? "120000", 120000);
+const AGENT_RUN_POLL_MS = parsePositiveMs(process.env.ACX_AGENT_RUN_POLL_MS ?? "700", 700);
+const AGENT_RUN_SLOT_WAIT_MS = parsePositiveMs(process.env.ACX_AGENT_RUN_SLOT_WAIT_MS ?? "120000", 120000);
+const AGENT_RUN_ENQUEUE_POLL_MS = parsePositiveMs(process.env.ACX_AGENT_RUN_ENQUEUE_POLL_MS ?? "500", 500);
 const DEFAULT_SYSTEM_PROMPT =
   "You are a staff software engineer with top design and implementation skills. " +
   "Start by reading AGENTS.md. " + 
@@ -61,23 +72,17 @@ function extractAgentRunMessageText(value: unknown, depth = 0): string[] {
       return [typedValue.text];
     }
 
-    if (typedValue.content !== undefined) {
-      return extractAgentRunMessageText(typedValue.content, depth + 1);
-    }
-
-    if (typedValue.message !== undefined) {
-      return extractAgentRunMessageText(typedValue.message, depth + 1);
-    }
-
-    if (typedValue.result !== undefined) {
-      return extractAgentRunMessageText(typedValue.result, depth + 1);
-    }
-
-    if (typedValue.summary !== undefined) {
-      return extractAgentRunMessageText(typedValue.summary, depth + 1);
-    }
-
-    return [];
+    const candidates = [
+      typedValue.content,
+      typedValue.message,
+      typedValue.response,
+      typedValue.result,
+      typedValue.summary,
+      typedValue.output,
+      typedValue.aggregated_output,
+      typedValue.items,
+    ];
+    return candidates.flatMap((entry) => extractAgentRunMessageText(entry, depth + 1));
   }
 
   return [];
@@ -175,6 +180,8 @@ interface TopologyNodeRow {
   parent_id: string | null;
   layout_x: number | null;
   layout_y: number | null;
+  ownership: string | null;
+  boundary: string | null;
 }
 
 interface TopologyEdgeRow {
@@ -183,6 +190,7 @@ interface TopologyEdgeRow {
   from_node_id: string;
   to_node_id: string;
   protocol: string | null;
+  layer7: string | null;
 }
 
 interface ConcernRow {
@@ -316,6 +324,7 @@ interface AssistantRunPlanResponse {
   messages: ThreadChatMessage[];
   systemId: string;
   threadState?: ThreadDetailPayload;
+  model?: string;
 }
 
 interface AssistantRunQueuedResponse {
@@ -323,6 +332,7 @@ interface AssistantRunQueuedResponse {
   status: "queued" | "running";
   message: "Run queued for desktop execution";
   systemId: string;
+  model?: string;
 }
 
 interface AssistantRunRequestBody {
@@ -330,6 +340,7 @@ interface AssistantRunRequestBody {
   mode: "direct" | "plan";
   planActionId: string | null;
   executor: AssistantExecutor;
+  model: string;
   wait: boolean;
 }
 
@@ -363,6 +374,7 @@ interface AssistantRunRow {
   thread_id: string;
   project_id: string;
   requested_by_user_id: string | null;
+  model: string;
   mode: "direct" | "plan";
   plan_action_id: string | null;
   chat_message_id: string | null;
@@ -374,6 +386,7 @@ interface AssistantRunRow {
   run_result_messages: string[] | null;
   run_result_changes: AssistantRunPlanChange[] | null;
   run_error: string | null;
+  created_at: string;
 }
 
 interface BeginActionRow {
@@ -474,7 +487,7 @@ async function collectOpenShipBundleDescriptorFiles(bundleDir: string): Promise<
 }
 
 async function buildOpenShipBundleDescriptor(threadId: string, contextSystemId: string): Promise<OpenShipBundleDescriptor> {
-  const workspace = await mkdtemp(join(tmpdir(), "staffx-openship-bundle-"));
+  const workspace = await mkdtemp(join(tmpdir(), "acx-openship-bundle-"));
   try {
     const bundleDir = await generateOpenShipFileBundle(threadId, workspace);
     const files = await collectOpenShipBundleDescriptorFiles(bundleDir);
@@ -556,6 +569,7 @@ interface MatrixDocumentAttach {
   concern: string;
   concerns: string[];
   refType: DocKind;
+  docHash?: string;
 }
 
 interface MatrixDocumentCreateBodyBase {
@@ -600,6 +614,12 @@ interface ParsedDocumentText {
   body: string;
 }
 
+const CODEX_MODEL = "gpt-5.3-codex";
+const LEGACY_CODEX_MODEL = "codex-5.3";
+const ALLOWED_ASSISTANT_MODELS = ["claude-opus-4-6", "claude-sonnet-4-6", CODEX_MODEL, LEGACY_CODEX_MODEL] as const;
+type AssistantModel = (typeof ALLOWED_ASSISTANT_MODELS)[number];
+const DEFAULT_ASSISTANT_MODEL: AssistantModel = "claude-opus-4-6";
+
 interface TopologyLayoutBody {
   positions: Array<{
     nodeId: string;
@@ -623,6 +643,18 @@ function parseThreadId(threadId: string): number | null {
   return parsed;
 }
 
+function resolveAssistantModel(raw: unknown): AssistantModel | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "string") return null;
+  const normalized = raw.trim();
+  if (normalized.length === 0) return null;
+  return ALLOWED_ASSISTANT_MODELS.includes(normalized as AssistantModel) ? (normalized as AssistantModel) : null;
+}
+
+function normalizeAssistantModel(rawModel: AssistantModel): AssistantModel {
+  return rawModel === CODEX_MODEL ? LEGACY_CODEX_MODEL : rawModel;
+}
+
 function parseAssistantRunMode(value: unknown): "direct" | "plan" | null {
   if (value !== "direct" && value !== "plan") return null;
   return value;
@@ -641,6 +673,7 @@ function parseAssistantRunRequest(body: unknown): AssistantRunRequestBody | null
     mode: unknown;
     planActionId: unknown;
     executor: unknown;
+    model: unknown;
     wait: unknown;
   }>;
   const mode = parseAssistantRunMode(payload.mode);
@@ -652,8 +685,17 @@ function parseAssistantRunRequest(body: unknown): AssistantRunRequestBody | null
   if (payload.wait !== undefined && payload.wait !== true && payload.wait !== false) return null;
   const wait = payload.wait === undefined ? true : payload.wait;
   const executor: AssistantExecutor = executorRaw === "desktop" ? "desktop" : "backend";
+  const rawModel = payload.model;
+  let model: AssistantModel;
+  if (rawModel === undefined) {
+    model = DEFAULT_ASSISTANT_MODEL;
+  } else {
+    const parsedModel = resolveAssistantModel(rawModel);
+    if (parsedModel === null) return null;
+    model = normalizeAssistantModel(parsedModel);
+  }
 
-  return { mode, chatMessageId, planActionId, executor, wait };
+  return { mode, chatMessageId, planActionId, executor, model, wait };
 }
 
 async function getAssistantRunTriggerMessage(threadId: string, chatMessageId: string | null): Promise<AssistantRunMessageLookupRow | null> {
@@ -861,6 +903,7 @@ function runExecutionError(error: unknown): string {
 function mapAgentRunRowToResponse(row: {
   runId: string;
   systemId: string;
+  model?: string;
   runResultStatus?: "success" | "failed" | null;
   runResultMessages?: string[] | null;
   runResultChanges?: AssistantRunPlanChange[] | null;
@@ -870,13 +913,14 @@ function mapAgentRunRowToResponse(row: {
   threadState?: ThreadDetailPayload;
 }): AssistantRunPlanResponse | AssistantRunQueuedResponse {
   if (row.threadStatus !== "success" && row.threadStatus !== "failed" && row.threadStatus !== "cancelled") {
-    return {
-      runId: row.runId,
-      status: row.threadStatus,
-      message: "Run has not completed yet.",
-      systemId: row.systemId,
-    };
-  }
+      return {
+        runId: row.runId,
+        status: row.threadStatus,
+        message: "Run queued for desktop execution",
+        model: row.model,
+        systemId: row.systemId,
+      };
+    }
 
   const status = row.threadStatus === "cancelled" ? "failed" : row.runResultStatus ?? row.threadStatus;
   const messages = row.runResultMessages && row.runResultMessages.length > 0
@@ -888,6 +932,7 @@ function mapAgentRunRowToResponse(row: {
     : (fallbackMessages.length > 0 ? fallbackMessages : ["No execution output."]);
   const changes = row.runResultChanges ?? [];
   return {
+    model: row.model,
     planActionId: null,
     planResponseActionId: null,
     executeActionId: null,
@@ -904,9 +949,9 @@ function mapAgentRunRowToResponse(row: {
 
 async function getAgentRunByThreadId(threadId: string, runId: string): Promise<AssistantRunRow | null> {
   const result = await query<AssistantRunRow>(
-    `SELECT id, thread_id, project_id, requested_by_user_id, mode, plan_action_id, chat_message_id,
+    `SELECT id, thread_id, project_id, requested_by_user_id, model, mode, plan_action_id, chat_message_id,
             prompt, system_prompt, status, runner_id, run_result_status,
-            run_result_messages, run_result_changes, run_error
+            run_result_messages, run_result_changes, run_error, created_at
        FROM agent_runs
       WHERE id = $1 AND thread_id = $2`,
     [runId, threadId],
@@ -921,10 +966,27 @@ async function persistDesktopAgentRunCompletionMessage(
   runResultStatus: "success" | "failed",
 ): Promise<AssistantRunCompletionRecord | null> {
   const responseActionId = randomUUID();
-  const normalizedMessages = sanitizeAgentRunMessages(payload.messages)
-    .filter((message) => !message.startsWith("OpenShip changes:"));
-  if (normalizedMessages.length === 0) return null;
-  const responseMessage = normalizedMessages.join(" | ");
+  const normalizedMessages = sanitizeAgentRunMessages(payload.messages);
+  const nonChangeMessages = normalizedMessages.filter(
+    (message) => !message.startsWith("OpenShip changes:"),
+  );
+
+  const responseMessages = nonChangeMessages.length > 0
+    ? nonChangeMessages
+    : payload.changes.length > 0
+      ? normalizedMessages
+      : [
+          ...normalizedMessages.filter((message) => !message.startsWith("OpenShip changes:")),
+          payload.status === "failed"
+            ? (payload.error ?? "Execution failed.")
+            : "Execution completed.",
+        ];
+  const uniqueResponseMessages = [...new Set(responseMessages)];
+  if (uniqueResponseMessages.length === 0) {
+    return null;
+  }
+
+  const responseMessage = uniqueResponseMessages.join(" | ");
   await client.query(
     `SELECT begin_action($1, $2, $3::action_type, $4) AS output_system_id`,
     [threadId, responseActionId, "ExecuteResponse", "Agent execution response"],
@@ -1270,7 +1332,7 @@ function isDocumentKind(value: string): value is DocKind {
 
 function parseDocumentAttach(
   attach: Partial<MatrixDocumentAttach> | undefined,
-): { nodeId: string; concern: string; concerns: string[]; refType: DocKind } | undefined {
+): MatrixDocumentAttach | undefined {
   if (!attach) return undefined;
   if (typeof attach !== "object") return undefined;
   const parsedAttach = attach as Partial<{
@@ -1278,6 +1340,7 @@ function parseDocumentAttach(
     concerns: string[];
     concern: string;
     refType: string;
+    docHash: string;
   }>;
 
   if (typeof parsedAttach.nodeId !== "string" || typeof parsedAttach.refType !== "string") {
@@ -1297,7 +1360,13 @@ function parseDocumentAttach(
   if (!nodeId || !concerns) return undefined;
   if (!isDocumentKind(refType)) return undefined;
 
-  return { nodeId, concern: concerns[0], concerns, refType: refType as DocKind };
+  return {
+    nodeId,
+    concern: concerns[0],
+    concerns,
+    refType: refType as DocKind,
+    docHash: typeof parsedAttach.docHash === "string" && parsedAttach.docHash.trim() ? parsedAttach.docHash.trim() : undefined,
+  };
 }
 
 function normalizeMatrixDocumentReplaceBody(body: unknown): MatrixDocumentReplaceBody | null {
@@ -1426,6 +1495,8 @@ interface ThreadDetailPayload {
       parentId: string | null;
       layoutX: number | null;
       layoutY: number | null;
+      ownership: "first_party" | "third_party";
+      boundary: "internal" | "external";
     }>;
     edges: Array<{
       id: string;
@@ -1433,6 +1504,7 @@ interface ThreadDetailPayload {
       fromNodeId: string;
       toNodeId: string;
       protocol: string | null;
+      layer7: string | null;
     }>;
   };
   systemPrompt: string | null;
@@ -1450,11 +1522,13 @@ interface ThreadDetailPayload {
       parentId: string | null;
       layoutX: number | null;
       layoutY: number | null;
+      ownership: "first_party" | "third_party";
+      boundary: "internal" | "external";
     }>;
     cells: MatrixCell[];
-    documents: Array<{
+  documents: Array<{
       hash: string;
-      kind: "Document" | "Skill";
+      kind: "Document" | "Skill" | "Prompt";
       title: string;
       language: string;
       text: string;
@@ -1594,6 +1668,7 @@ interface SystemPromptAttachmentPayload {
   concern: string;
   concerns: string[];
   refType: "Prompt";
+  docHash: string;
 }
 
 interface SystemPromptValidationFailure {
@@ -1640,6 +1715,7 @@ async function validateSystemPromptAttachment(
       concern: SYSTEM_PROMPT_CONCERN,
       concerns: [SYSTEM_PROMPT_CONCERN],
       refType: "Prompt",
+      docHash: attachment.docHash,
     },
   };
 }
@@ -1723,14 +1799,16 @@ async function buildThreadStatePayload(context: ThreadContext): Promise<ThreadDe
            kind,
            parent_id,
            (metadata->'layout'->>'x')::double precision AS layout_x,
-           (metadata->'layout'->>'y')::double precision AS layout_y
+           (metadata->'layout'->>'y')::double precision AS layout_y,
+           metadata->>'ownership' AS ownership,
+           metadata->>'boundary' AS boundary
          FROM nodes
          WHERE system_id = $1
          ORDER BY name, id`,
         [systemId],
       ),
       query<TopologyEdgeRow>(
-        `SELECT id, type, from_node_id, to_node_id, metadata->>'protocol' AS protocol
+        `SELECT id, type, from_node_id, to_node_id, metadata->>'protocol' AS protocol, metadata->>'layer7' AS layer7
          FROM edges
          WHERE system_id = $1
          ORDER BY id`,
@@ -1799,6 +1877,8 @@ async function buildThreadStatePayload(context: ThreadContext): Promise<ThreadDe
     parentId: row.parent_id,
     layoutX: row.layout_x,
     layoutY: row.layout_y,
+    ownership: normalizeNodeOwnership(row.ownership),
+    boundary: normalizeNodeBoundary(row.boundary),
   }));
 
   const concerns = concernsResult.rows.map((row) => ({
@@ -1874,6 +1954,7 @@ async function buildThreadStatePayload(context: ThreadContext): Promise<ThreadDe
         fromNodeId: row.from_node_id,
         toNodeId: row.to_node_id,
         protocol: row.protocol,
+        layer7: row.layer7,
       })),
     },
     matrix: {
@@ -2374,21 +2455,22 @@ export async function threadRoutes(app: FastifyInstance) {
         );
 
         const outputSystemId = beginResult.rows[0]?.output_system_id;
-        if (!outputSystemId) {
-          throw new Error("Failed to create action output system");
-        }
+      if (!outputSystemId) {
+        throw new Error("Failed to create action output system");
+      }
 
-        if (payload.refType === "Prompt") {
-          const validation = await validateSystemPromptAttachment(
-            client,
-            outputSystemId,
-            {
-              nodeId: payload.nodeId,
-              concern: payload.concern,
-              concerns: payload.concerns,
-              refType: "Prompt",
-            },
-          );
+      if (payload.refType === "Prompt") {
+        const validation = await validateSystemPromptAttachment(
+          client,
+          outputSystemId,
+          {
+            nodeId: payload.nodeId,
+            concern: payload.concern,
+            concerns: payload.concerns,
+            refType: "Prompt",
+            docHash: payload.docHash,
+          },
+        );
           if (!validation.valid) {
             await client.query("ROLLBACK");
             inTransaction = false;
@@ -2628,6 +2710,7 @@ export async function threadRoutes(app: FastifyInstance) {
               concern: payload.attach.concern,
               concerns: payload.attach.concerns,
               refType: "Prompt",
+              docHash: payload.attach.docHash ?? hash,
             },
           );
           if (!validation.valid) {
@@ -3054,6 +3137,7 @@ export async function threadRoutes(app: FastifyInstance) {
               concern: payload.concern,
               concerns: payload.concerns,
               refType: "Prompt",
+              docHash: payload.docHash,
             },
           );
           if (!validation.valid) {
@@ -3265,6 +3349,7 @@ export async function threadRoutes(app: FastifyInstance) {
           planActionId: null,
           chatMessageId: parsedBody.chatMessageId,
           prompt: runPrompt,
+          model: parsedBody.model,
           systemPrompt: resolvedSystemPrompt,
         }, AGENT_RUN_SLOT_WAIT_MS, AGENT_RUN_ENQUEUE_POLL_MS);
 
@@ -3293,6 +3378,7 @@ export async function threadRoutes(app: FastifyInstance) {
         return mapAgentRunRowToResponse({
           runId: runRow.id,
           systemId,
+          model: runRow.model,
           runResultStatus: runRow.run_result_status,
           runResultMessages: runRow.run_result_messages,
           runResultChanges: runRow.run_result_changes,
@@ -3385,6 +3471,7 @@ export async function threadRoutes(app: FastifyInstance) {
             planActionId,
             chatMessageId: parsedBody.chatMessageId,
             prompt: runPrompt,
+            model: parsedBody.model,
             systemPrompt: resolvedSystemPrompt,
           }, AGENT_RUN_SLOT_WAIT_MS, AGENT_RUN_ENQUEUE_POLL_MS);
 
@@ -3683,6 +3770,7 @@ export async function threadRoutes(app: FastifyInstance) {
         status: claimed.status,
         prompt: claimed.prompt,
         systemPrompt: claimed.system_prompt,
+        model: claimed.model,
         systemId,
       };
     },
@@ -3762,6 +3850,15 @@ export async function threadRoutes(app: FastifyInstance) {
           parsed.error,
           runnerId,
         );
+        req.log.info(
+          {
+            runId: run.id,
+            completionRunUpdateApplied,
+            completionStatus,
+            runnerId,
+          },
+          "updateAgentRunResult result",
+        );
         const normalizedCompletionStatus = completionStatus === "failed" ? "failed" : "success";
         await completionClient.query("BEGIN");
         if (completionRunUpdateApplied) {
@@ -3813,6 +3910,7 @@ export async function threadRoutes(app: FastifyInstance) {
       return mapAgentRunRowToResponse({
         runId: updated.id,
         systemId,
+        model: updated.model,
         runResultStatus: updated.run_result_status,
         runResultMessages: updated.run_result_messages,
         runResultChanges: updated.run_result_changes,
@@ -3856,14 +3954,30 @@ export async function threadRoutes(app: FastifyInstance) {
       const threadState = shouldIncludeThreadState
         ? await buildThreadStatePayload(context).catch(() => undefined)
         : undefined;
+      let runMessages: AssistantRunMessageRow[] = [];
+      if (run.status === "success" || run.status === "failed" || run.status === "cancelled") {
+        const runMessageRows = await query<AssistantRunMessageRow>(
+          `SELECT m.id, m.action_id, m.role, m.content, m.created_at, a.position AS action_position, a.type AS action_type
+           FROM messages m
+           JOIN actions a ON a.thread_id = m.thread_id AND a.id = m.action_id
+           WHERE m.thread_id = $1
+             AND a.type = 'ExecuteResponse'
+             AND m.created_at >= $2
+           ORDER BY m.created_at DESC, m.position DESC`,
+          [context.threadId, run.created_at],
+        );
+        runMessages = runMessageRows.rows;
+      }
 
       return mapAgentRunRowToResponse({
         runId: run.id,
         systemId,
+        model: run.model,
         runResultStatus: run.run_result_status,
         runResultMessages: run.run_result_messages,
         runResultChanges: run.run_result_changes,
         runError: run.run_error,
+        messages: runMessages,
         threadStatus: run.status,
         threadState,
       });

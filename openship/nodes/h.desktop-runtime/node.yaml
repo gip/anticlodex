@@ -1,0 +1,23 @@
+"id": "h.desktop-runtime"
+"kind": "Host"
+"name": "Desktop Runtime"
+"parentId": "s.root"
+"metadata":
+  "openshipKey": "desktop-runtime"
+  "ownership": "first_party"
+  "boundary": "external"
+  "platform": "electron"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:6b153222b6b1773d1ce909b07da11d8187b2f3f07b9f7eafa62c3461956719d5"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:70afcc38e968105ea07ad667d89372eba0a37def4e4690a800688a5b4069ea94"
+    "skillRefs": []
+"artifacts":
+  "Summary":
+    - "a.h.desktop-runtime.features.summary.v1"
+  "Docs":
+    - "a.h.desktop-runtime.specs.docs.v1"

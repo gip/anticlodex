@@ -1,0 +1,32 @@
+"id": "p.desktop-renderer"
+"kind": "Process"
+"name": "Desktop Renderer Process"
+"parentId": "h.desktop-runtime"
+"metadata":
+  "openshipKey": "desktop-renderer"
+  "ownership": "first_party"
+  "boundary": "external"
+  "runtime": "react/electron-renderer"
+"matrix":
+  "Features":
+    "documentRefs":
+      - "sha256:a6e47e160c62935ab3bcf93e6cd2cdda707ec4cc719296dfdcaed0cb6c16c2fc"
+    "skillRefs": []
+  "General Specs":
+    "documentRefs":
+      - "sha256:6789204f1db000ffc89f565b5bda4309711380a36642bac3fcd14a7eccbd188c"
+    "skillRefs": []
+  "Interfaces":
+    "documentRefs":
+      - "sha256:a50f22f32a0e96be26329516bf85862355203bdad9c99ef865a6e508bb8561f8"
+    "skillRefs": []
+  "General Skills":
+    "documentRefs": []
+    "skillRefs":
+      - "sha256:98cfae5b91d542d0bc6ee1912bee6c2e9de340e0d0adb77d9c810a6a6fbbbf03"
+      - "sha256:c8b4d75c7cf3a0798c14b76ac2af46d6dd3b6570c03b96b0db0ec2b601d7bedf"
+"artifacts":
+  "Summary":
+    - "a.p.desktop-renderer.features.summary.v1"
+  "Docs":
+    - "a.p.desktop-renderer.specs.docs.v1"

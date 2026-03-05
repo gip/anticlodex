@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import pool, { query } from "./db.js";
-import type { AgentRunPlanChange, AgentRunResult } from "@staffx/agent-runtime";
+import type { AgentRunPlanChange, AgentRunResult } from "@acx/agent-runtime";
 
 export type AgentRunMode = "direct" | "plan";
 export type AgentRunStatus = "queued" | "running" | "success" | "failed" | "cancelled";
@@ -11,6 +11,7 @@ export interface AgentRunRow {
   thread_id: string;
   project_id: string;
   requested_by_user_id: string | null;
+  model: string;
   mode: AgentRunMode;
   plan_action_id: string | null;
   chat_message_id: string | null;
@@ -33,6 +34,7 @@ export interface EnqueueAgentRunParams {
   projectId: string;
   requestedByUserId: string | null;
   mode: AgentRunMode;
+  model: string;
   planActionId: string | null;
   chatMessageId: string | null;
   prompt: string;
@@ -56,18 +58,19 @@ export async function enqueueAgentRun(params: EnqueueAgentRunParams): Promise<st
       thread_id,
       project_id,
       requested_by_user_id,
+      model,
       mode,
       plan_action_id,
       chat_message_id,
       prompt,
-      system_prompt,
-      status
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued') RETURNING id`,
+      system_prompt
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
     [
       randomUUID(),
       params.threadId,
       params.projectId,
       params.requestedByUserId,
+      params.model,
       params.mode,
       params.planActionId,
       params.chatMessageId,
@@ -144,6 +147,7 @@ export async function claimNextAgentRun(runnerId: string): Promise<AgentRunRow |
         ar.thread_id,
         ar.project_id,
         ar.requested_by_user_id,
+        ar.model,
         ar.mode,
         ar.plan_action_id,
         ar.chat_message_id,
@@ -181,22 +185,27 @@ export async function claimAgentRunById(runId: string, runnerId: string, threadI
   try {
     const values = threadId ? [runnerId, runId, threadId] : [runnerId, runId];
     const whereClause = threadId ? "AND ar.thread_id = $3" : "";
+    const claimedTransition = `
+      (ar.status = 'queued' AND ar.runner_id IS DISTINCT FROM $1)
+      OR (ar.status = 'running' AND ar.runner_id = $1)
+    `;
 
     const result = await query<AgentRunRow>(
       `UPDATE agent_runs ar
           SET status = 'running',
               runner_id = $1,
-              started_at = NOW(),
+              started_at = CASE WHEN ar.status = 'queued' THEN NOW() ELSE ar.started_at END,
               updated_at = NOW(),
               run_error = NULL
         WHERE ar.id = $2
-          AND ar.status = 'queued'
+          AND ${claimedTransition}
           ${whereClause}
       RETURNING
         ar.id,
         ar.thread_id,
         ar.project_id,
         ar.requested_by_user_id,
+        ar.model,
         ar.mode,
         ar.plan_action_id,
         ar.chat_message_id,
@@ -233,6 +242,7 @@ export async function getAgentRunById(runId: string): Promise<AgentRunRow | null
       thread_id,
       project_id,
       requested_by_user_id,
+      model,
       mode,
       plan_action_id,
       chat_message_id,

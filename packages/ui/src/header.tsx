@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Moon, Sun } from "lucide-react";
+import { Moon, Sun, PanelLeft } from "lucide-react";
 import { useAuth } from "./auth-context";
 import { useTheme } from "./theme";
 import { Link } from "./link";
@@ -9,10 +9,12 @@ export function Header({
   variant = "web",
   projectLabel,
   projectHref,
+  onToggleSidebar,
 }: {
   variant?: "web" | "desktop";
   projectLabel?: string;
   projectHref?: string;
+  onToggleSidebar?: () => void;
 }) {
   const { isAuthenticated, isLoading, user, login, logout } = useAuth();
   const { theme, toggle } = useTheme();
@@ -35,11 +37,23 @@ export function Header({
   return (
     <header className={`header${isDesktop ? " header--desktop" : ""}`}>
       <div className="header-left">
+        {isDesktop && onToggleSidebar && isAuthenticated && (
+          <button className="btn-icon btn-icon-theme header-no-drag" onClick={onToggleSidebar} aria-label="Toggle sidebar">
+            <PanelLeft size={14} />
+          </button>
+        )}
         {!isDesktop && (
-          <Link to="/" className="header-logo">
-            <Logo />
-            StaffX
-          </Link>
+          <>
+            <Link to="/" className="header-logo">
+              <Logo />
+              AntiClodeX
+            </Link>
+            {onToggleSidebar && isAuthenticated && (
+              <button className="btn-icon btn-icon-theme header-sidebar-toggle-web" onClick={onToggleSidebar} aria-label="Toggle sidebar">
+                <PanelLeft size={14} />
+              </button>
+            )}
+          </>
         )}
         {isDesktop && projectLabel && (
           <Link to={projectHref ?? "/"} className="header-project-label header-no-drag">
@@ -51,7 +65,7 @@ export function Header({
         <div className="header-center">
           <Link to="/" className="header-logo header-no-drag">
             <Logo />
-            StaffX
+            AntiClodeX
           </Link>
         </div>
       )}

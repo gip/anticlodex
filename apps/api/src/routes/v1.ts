@@ -8,7 +8,7 @@ import type { PoolClient } from "pg";
 
 import pool, { query } from "../db.js";
 import { generateOpenShipFileBundle } from "../agent-runner.js";
-import { verifyAuth, type AuthUser } from "../auth.js";
+import { verifyAuth, verifyOptionalAuth, type AuthUser } from "../auth.js";
 import {
   claimAgentRunById,
   enqueueAgentRunWithWait,
@@ -218,6 +218,10 @@ async function seedSystemTemplateV1(
 
 interface V1AuthRequest extends FastifyRequest {
   auth: AuthUser;
+}
+
+function getOptionalAuthUser(req: FastifyRequest): AuthUser | null {
+  return (req as FastifyRequest & { auth?: AuthUser }).auth ?? null;
 }
 
 type CursorLike = string | undefined;
@@ -896,7 +900,7 @@ async function resolveProjectSystemId(projectId: string): Promise<string | null>
   return result.rows[0]?.system_id ?? null;
 }
 
-async function resolveThreadAccess(threadId: string, user: AuthUser): Promise<V1ThreadRow | null> {
+async function resolveThreadAccess(threadId: string, viewerUserId: string | null): Promise<V1ThreadRow | null> {
   const result = await query<V1ThreadRow>(
     `SELECT
        t.id,
@@ -909,7 +913,7 @@ async function resolveThreadAccess(threadId: string, user: AuthUser): Promise<V1
        t.source_thread_id,
        COALESCE(NULLIF(pc.role::text, ''),
          CASE
-           WHEN p.owner_id = $2 THEN 'Owner'
+           WHEN p.owner_id = CAST($2 AS uuid) THEN 'Owner'
            WHEN p.visibility = 'public' THEN 'Viewer'
            ELSE NULL
          END
@@ -919,10 +923,10 @@ async function resolveThreadAccess(threadId: string, user: AuthUser): Promise<V1
      JOIN users owner_u ON owner_u.id = p.owner_id
      LEFT JOIN project_collaborators pc
        ON pc.project_id = p.id
-      AND pc.user_id = $2
+      AND pc.user_id = CAST($2 AS uuid)
      WHERE t.id = $1
        AND p.is_archived = false`,
-    [threadId, user.id],
+    [threadId, viewerUserId],
   );
 
   if (result.rowCount === 0) return null;
@@ -943,7 +947,7 @@ type ThreadAccessResolution =
 
 async function resolveThreadAccessByProjectThreadId(
   projectThreadId: number,
-  user: AuthUser,
+  viewerUserId: string | null,
   projectId: string | null,
 ): Promise<ThreadAccessResolution> {
   if (projectId) {
@@ -961,7 +965,7 @@ async function resolveThreadAccessByProjectThreadId(
              t.source_thread_id,
              COALESCE(NULLIF(pc.role::text, ''),
                CASE
-                 WHEN p.owner_id = $2 THEN 'Owner'
+                 WHEN p.owner_id = CAST($2 AS uuid) THEN 'Owner'
                  WHEN p.visibility = 'public' THEN 'Viewer'
                  ELSE NULL
                END
@@ -970,14 +974,14 @@ async function resolveThreadAccessByProjectThreadId(
            JOIN projects p ON p.id = t.project_id
            LEFT JOIN project_collaborators pc
              ON pc.project_id = p.id
-            AND pc.user_id = $2
+            AND pc.user_id = CAST($2 AS uuid)
            WHERE t.project_thread_id = $1
              AND t.project_id = $3
              AND p.is_archived = false
          ) accessible
         WHERE accessible.access_role IS NOT NULL
         LIMIT 1`,
-      [projectThreadId, user.id, projectId],
+      [projectThreadId, viewerUserId, projectId],
     );
 
     if (result.rowCount === 0) return { kind: "not_found" };
@@ -998,7 +1002,7 @@ async function resolveThreadAccessByProjectThreadId(
            t.source_thread_id,
            COALESCE(NULLIF(pc.role::text, ''),
              CASE
-               WHEN p.owner_id = $2 THEN 'Owner'
+               WHEN p.owner_id = CAST($2 AS uuid) THEN 'Owner'
                WHEN p.visibility = 'public' THEN 'Viewer'
                ELSE NULL
              END
@@ -1007,13 +1011,13 @@ async function resolveThreadAccessByProjectThreadId(
          JOIN projects p ON p.id = t.project_id
          LEFT JOIN project_collaborators pc
            ON pc.project_id = p.id
-          AND pc.user_id = $2
+          AND pc.user_id = CAST($2 AS uuid)
          WHERE t.project_thread_id = $1
            AND p.is_archived = false
        ) accessible
       WHERE accessible.access_role IS NOT NULL
       LIMIT 2`,
-    [projectThreadId, user.id],
+    [projectThreadId, viewerUserId],
   );
 
   const rowCount = result.rowCount ?? 0;
@@ -1033,20 +1037,20 @@ function parseV1ThreadRouteId(raw: string): V1ThreadRouteId | null {
 
 async function resolveThreadAccessByRequestParam(
   rawThreadId: string,
-  user: AuthUser,
+  viewerUserId: string | null,
   rawProjectId: unknown,
 ): Promise<ThreadAccessResolution> {
   const parsed = parseV1ThreadRouteId(rawThreadId);
   if (!parsed) return { kind: "invalid_thread_id" };
 
   if (parsed.kind === "uuid") {
-    const byUuid = await resolveThreadAccess(parsed.id, user);
+    const byUuid = await resolveThreadAccess(parsed.id, viewerUserId);
     return byUuid ? { kind: "found", thread: byUuid } : { kind: "not_found" };
   }
 
   const parsedProjectId = parseOptionalProjectId(rawProjectId);
   if (parsedProjectId === "invalid") return { kind: "invalid_project_id" };
-  return resolveThreadAccessByProjectThreadId(parsed.projectThreadId, user, parsedProjectId);
+  return resolveThreadAccessByProjectThreadId(parsed.projectThreadId, viewerUserId, parsedProjectId);
 }
 
 function writeThreadAccessFailure(reply: FastifyReply, result: Exclude<ThreadAccessResolution, { kind: "found" }>): void {
@@ -1314,19 +1318,35 @@ async function publishThreadMatrixChanged(threadId: string, user: AuthUser, aggr
 
 export async function v1Routes(app: FastifyInstance) {
   app.addHook("preHandler", async (req, reply) => {
-    await verifyAuth(req, reply);
+    const routeUrl = req.routeOptions.url;
+    const isOptionalReadRoute = req.method === "GET"
+      && (
+        routeUrl === "/projects"
+        || routeUrl === "/v1/projects"
+        || routeUrl === "/threads"
+        || routeUrl === "/v1/threads"
+        || routeUrl === "/threads/:threadId"
+        || routeUrl === "/v1/threads/:threadId"
+      );
+
+    if (isOptionalReadRoute) {
+      await verifyOptionalAuth(req, reply);
+    } else {
+      await verifyAuth(req, reply);
+    }
+
     if (reply.sent) return;
   });
 
   app.get<{ Querystring: { page?: number; pageSize?: number; name?: string } }>(
     "/projects",
     async (req, reply) => {
-      const user = (req as V1AuthRequest).auth;
+      const viewerUserId = getOptionalAuthUser(req)?.id ?? null;
       const page = parsePositiveInt(req.query.page, 1, 1, Number.MAX_SAFE_INTEGER);
       const pageSize = parsePositiveInt(req.query.pageSize, 50, 1, 200);
       const offset = (page - 1) * pageSize;
 
-      const params: Array<unknown> = [user.id, pageSize + 1, offset];
+      const params: Array<unknown> = [viewerUserId, pageSize + 1, offset];
       let nameClause = "";
       if (req.query.name?.trim()) {
         params.push(`%${req.query.name.trim()}%`);
@@ -2176,12 +2196,12 @@ export async function v1Routes(app: FastifyInstance) {
   app.get<{ Querystring: { projectId?: string; page?: number; pageSize?: number } }>(
     "/threads",
     async (req, reply) => {
-      const user = (req as V1AuthRequest).auth;
+      const viewerUserId = getOptionalAuthUser(req)?.id ?? null;
       const page = parsePositiveInt(req.query.page, 1, 1, Number.MAX_SAFE_INTEGER);
       const pageSize = parsePositiveInt(req.query.pageSize, 50, 1, 200);
       const offset = (page - 1) * pageSize;
 
-      const params: Array<unknown> = [user.id];
+      const params: Array<unknown> = [viewerUserId];
       const limitParam = params.length + 1;
       const offsetParam = params.length + 2;
       params.push(pageSize + 1, offset);
@@ -2361,9 +2381,9 @@ export async function v1Routes(app: FastifyInstance) {
   app.get<{ Params: { threadId: string }; Querystring: V1ThreadScopeQuerystring }>(
     "/threads/:threadId",
     async (req, reply) => {
-      const user = (req as V1AuthRequest).auth;
+      const viewerUserId = getOptionalAuthUser(req)?.id ?? null;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, viewerUserId, req.query.projectId);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -2512,7 +2532,7 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -2580,7 +2600,7 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -2602,7 +2622,7 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -2673,7 +2693,7 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -2741,7 +2761,7 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -2780,7 +2800,7 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -2875,7 +2895,7 @@ export async function v1Routes(app: FastifyInstance) {
       }
 
 
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -2965,7 +2985,7 @@ export async function v1Routes(app: FastifyInstance) {
         return notFoundProblem(reply, "Run not found");
       }
 
-      const thread = await resolveThreadAccess(run.thread_id, user);
+      const thread = await resolveThreadAccess(run.thread_id, user.id);
       if (!thread) {
         return forbiddenProblem(reply);
       }
@@ -2987,7 +3007,7 @@ export async function v1Routes(app: FastifyInstance) {
         return notFoundProblem(reply, "Run not found");
       }
 
-      const thread = await resolveThreadAccess(run.thread_id, user);
+      const thread = await resolveThreadAccess(run.thread_id, user.id);
       if (!thread) {
         return forbiddenProblem(reply, "Access denied for this run.");
       }
@@ -3034,7 +3054,7 @@ export async function v1Routes(app: FastifyInstance) {
         return notFoundProblem(reply, "Run not found");
       }
 
-      const thread = await resolveThreadAccess(run.thread_id, user);
+      const thread = await resolveThreadAccess(run.thread_id, user.id);
       if (!thread) {
         return forbiddenProblem(reply, "Access denied for this run.");
       }
@@ -3207,7 +3227,7 @@ export async function v1Routes(app: FastifyInstance) {
         return notFoundProblem(reply, "Run not found");
       }
 
-      const thread = await resolveThreadAccess(run.thread_id, user);
+      const thread = await resolveThreadAccess(run.thread_id, user.id);
       if (!thread) {
         return forbiddenProblem(reply, "Access denied for this run.");
       }

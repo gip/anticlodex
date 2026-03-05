@@ -18,8 +18,13 @@
   --accent: #000000;
   --accent-fg: #ffffff;
   --shadow-soft: 0 18px 42px rgba(23, 23, 23, 0.08);
-  --home-glow-primary: rgba(23, 23, 23, 0.1);
-  --home-glow-secondary: rgba(120, 120, 120, 0.1);
+  --home-glow-primary: rgba(255, 127, 53, 0.34);
+  --home-glow-secondary: rgba(40, 123, 255, 0.3);
+  --home-mesh-primary: rgba(255, 127, 53, 0.48);
+  --home-mesh-secondary: rgba(40, 123, 255, 0.4);
+  --home-grid-line: rgba(23, 23, 23, 0.12);
+  --home-panel-bg: rgba(255, 255, 255, 0.86);
+  --home-panel-bg-alt: rgba(255, 255, 255, 0.68);
   --focus-ring: rgba(23, 23, 23, 0.25);
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --sidebar-bg: #f0f0f0;
@@ -36,8 +41,13 @@
   --accent: #ffffff;
   --accent-fg: #000000;
   --shadow-soft: 0 18px 42px rgba(0, 0, 0, 0.45);
-  --home-glow-primary: rgba(255, 255, 255, 0.08);
-  --home-glow-secondary: rgba(140, 140, 140, 0.09);
+  --home-glow-primary: rgba(255, 173, 117, 0.28);
+  --home-glow-secondary: rgba(119, 177, 255, 0.26);
+  --home-mesh-primary: rgba(255, 141, 71, 0.42);
+  --home-mesh-secondary: rgba(90, 154, 255, 0.38);
+  --home-grid-line: rgba(255, 255, 255, 0.13);
+  --home-panel-bg: rgba(12, 12, 12, 0.84);
+  --home-panel-bg-alt: rgba(12, 12, 12, 0.68);
   --focus-ring: rgba(237, 237, 237, 0.35);
   --sidebar-bg: #141414;
 }
@@ -223,6 +233,21 @@ a.header-project-label:hover {
   padding: 40px 24px;
 }
 
+.home-landing {
+  isolation: isolate;
+  background:
+    radial-gradient(1200px 520px at -15% 8%, var(--home-mesh-primary), transparent 58%),
+    radial-gradient(900px 560px at 108% 88%, var(--home-mesh-secondary), transparent 60%),
+    conic-gradient(
+      from 210deg at 80% 20%,
+      var(--home-mesh-secondary),
+      transparent 38%,
+      var(--home-mesh-primary) 72%,
+      transparent 100%
+    ),
+    linear-gradient(165deg, var(--bg) 12%, var(--bg-secondary) 90%);
+}
+
 .hero-tagline {
   font-size: clamp(32px, 5vw, 48px);
   line-height: 1.06;
@@ -245,19 +270,23 @@ a.header-project-label:hover {
 }
 
 .home-landing::before {
-  width: 520px;
-  height: 520px;
-  right: -220px;
-  top: -180px;
+  width: 740px;
+  height: 740px;
+  right: -300px;
+  top: -280px;
   background: radial-gradient(circle at center, var(--home-glow-primary), transparent 68%);
+  filter: blur(2px);
+  opacity: 0.95;
 }
 
 .home-landing::after {
-  width: 420px;
-  height: 420px;
-  left: -180px;
-  bottom: -220px;
+  width: 620px;
+  height: 620px;
+  left: -260px;
+  bottom: -300px;
   background: radial-gradient(circle at center, var(--home-glow-secondary), transparent 70%);
+  filter: blur(2px);
+  opacity: 0.95;
 }
 
 .home-landing-panel {
@@ -267,11 +296,40 @@ a.header-project-label:hover {
   gap: 28px;
   position: relative;
   z-index: 1;
-  border: 1px solid var(--border);
+  border: 1px solid var(--home-grid-line);
   border-radius: 18px;
-  background: var(--surface-raised);
+  background: linear-gradient(145deg, var(--home-panel-bg), var(--home-panel-bg-alt));
   box-shadow: var(--shadow-soft);
   padding: 36px;
+  overflow: hidden;
+  backdrop-filter: blur(6px) saturate(1.35);
+  -webkit-backdrop-filter: blur(6px) saturate(1.35);
+}
+
+.home-landing-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(220px 160px at 82% 18%, var(--home-glow-secondary), transparent 72%),
+    radial-gradient(260px 180px at 12% 82%, var(--home-glow-primary), transparent 70%),
+    repeating-linear-gradient(
+      135deg,
+      transparent 0 8px,
+      var(--home-grid-line) 8px 10px
+    ),
+    repeating-linear-gradient(
+      45deg,
+      transparent 0 18px,
+      var(--home-grid-line) 18px 19px
+    );
+  opacity: 0.95;
+}
+
+.home-landing-panel > * {
+  position: relative;
+  z-index: 1;
 }
 
 .home-landing-content {

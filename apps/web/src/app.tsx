@@ -296,6 +296,7 @@ function appendProjectScope(path: string, projectId: string | null): string {
 }
 
 const API_URL = normalizeApiUrl(import.meta.env.VITE_API_URL ?? "http://localhost:3001");
+const MOBILE_DRAWER_BREAKPOINT_QUERY = "(max-width: 900px)";
 
 function upsertMatrixCell(cells: MatrixCell[], nextCell: MatrixCell): MatrixCell[] {
   const index = cells.findIndex(
@@ -1885,37 +1886,90 @@ function AppShell({
   refreshProjects: () => void;
 }) {
   const location = useLocation();
-  const [sidebarOpen, setSidebarOpen] = useState(() => {
+  const [isMobileViewport, setIsMobileViewport] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.matchMedia(MOBILE_DRAWER_BREAKPOINT_QUERY).matches;
+  });
+  const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(() => {
     try {
       return localStorage.getItem("acx-sidebar") !== "false";
     } catch {
       return true;
     }
   });
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const mediaQueryList = window.matchMedia(MOBILE_DRAWER_BREAKPOINT_QUERY);
+    const handleChange = (event: MediaQueryListEvent) => {
+      setIsMobileViewport(event.matches);
+    };
+    setIsMobileViewport(mediaQueryList.matches);
+    mediaQueryList.addEventListener("change", handleChange);
+    return () => mediaQueryList.removeEventListener("change", handleChange);
+  }, []);
 
   const toggleSidebar = useCallback(() => {
-    setSidebarOpen((prev) => {
+    if (isMobileViewport) {
+      setMobileSidebarOpen((prev) => !prev);
+      return;
+    }
+    setDesktopSidebarOpen((prev) => {
       const next = !prev;
       try { localStorage.setItem("acx-sidebar", String(next)); } catch {}
       return next;
     });
-  }, []);
+  }, [isMobileViewport]);
 
   const segments = location.pathname.replace(/^\//, "").split("/").filter(Boolean);
   const activeProjectOwner = segments.length >= 2 && segments[0] !== "settings" ? segments[0] : undefined;
   const activeProjectName = segments.length >= 2 && segments[0] !== "settings" ? segments[1] : undefined;
+  const sidebarOpen = isMobileViewport ? mobileSidebarOpen : desktopSidebarOpen;
+  const appLayoutClassName = `app-layout${isMobileViewport ? " app-layout--mobile" : ""}${isMobileViewport && sidebarOpen ? " app-layout--drawer-open" : ""}`;
+
+  useEffect(() => {
+    if (!isMobileViewport) return;
+    setMobileSidebarOpen(false);
+  }, [isMobileViewport, location.pathname, location.search, location.hash]);
+
+  useEffect(() => {
+    if (isAuthenticated) return;
+    setMobileSidebarOpen(false);
+  }, [isAuthenticated]);
+
+  useEffect(() => {
+    if (!isMobileViewport || !mobileSidebarOpen) return;
+    const previousBodyOverflow = document.body.style.overflow;
+    const previousHtmlOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+      document.documentElement.style.overflow = previousHtmlOverflow;
+    };
+  }, [isMobileViewport, mobileSidebarOpen]);
 
   return (
     <>
       <NavigateSync />
       <Header onToggleSidebar={toggleSidebar} />
-      <div className="app-layout">
+      {isAuthenticated && isMobileViewport && sidebarOpen && (
+        <button
+          type="button"
+          className="sidebar-backdrop"
+          aria-label="Close sidebar"
+          onClick={() => setMobileSidebarOpen(false)}
+        />
+      )}
+      <div className={appLayoutClassName}>
         {isAuthenticated && (
           <Sidebar
             projects={projects}
             activeProjectOwner={activeProjectOwner}
             activeProjectName={activeProjectName}
             open={sidebarOpen}
+            onNavigate={isMobileViewport ? () => setMobileSidebarOpen(false) : undefined}
           />
         )}
         <div className="app-content">

@@ -4036,7 +4036,7 @@ export function ThreadPage({
                 <h3>Topology</h3>
                 <div className="thread-card-actions">
                   <button
-                    className="btn-icon thread-card-action"
+                    className="btn-icon thread-card-action thread-enter-fullscreen-action"
                     type="button"
                     onClick={(e) => { e.stopPropagation(); enterFullscreen("topology"); }}
                     aria-label="Enter fullscreen topology"
@@ -4061,7 +4061,7 @@ export function ThreadPage({
                 <h3>Matrix</h3>
                 <div className="thread-card-actions">
                   <button
-                    className="btn-icon thread-card-action"
+                    className="btn-icon thread-card-action thread-enter-fullscreen-action"
                     type="button"
                     onClick={(e) => { e.stopPropagation(); enterFullscreen("matrix"); }}
                     aria-label="Enter fullscreen matrix"
@@ -4086,7 +4086,7 @@ export function ThreadPage({
                 <h3>Chat</h3>
                 <div className="thread-card-actions">
                   <button
-                    className="btn-icon thread-card-action"
+                    className="btn-icon thread-card-action thread-enter-fullscreen-action"
                     type="button"
                     onClick={(e) => { e.stopPropagation(); enterFullscreen("chat"); }}
                     aria-label="Enter fullscreen history"
@@ -4111,7 +4111,7 @@ export function ThreadPage({
                 <h3>Simulation</h3>
                 <div className="thread-card-actions">
                   <button
-                    className="btn-icon thread-card-action"
+                    className="btn-icon thread-card-action thread-enter-fullscreen-action"
                     type="button"
                     onClick={(e) => { e.stopPropagation(); enterFullscreen("simulation"); }}
                     aria-label="Enter fullscreen simulation"

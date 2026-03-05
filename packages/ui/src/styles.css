@@ -318,6 +318,25 @@ a.header-project-label:hover {
   color: var(--fg);
 }
 
+.home-highlight-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.home-highlight-soon {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  background: var(--surface);
+}
+
 .home-highlight-body {
   font-size: 13px;
   line-height: 1.5;

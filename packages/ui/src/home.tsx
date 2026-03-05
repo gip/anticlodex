@@ -231,10 +231,8 @@ export function Home({ projects, onCreateProject, onCheckProjectName }: HomeProp
               A platform for correct AI-generated software.
             </h1>
             <p className="home-landing-copy">
-              AntiClodeX is the human control plane for AI-generated software: it lets domain experts go from a
-              product description to a deployed, maintainable system using curated reference architectures, with visual
-              preview, and simulation, and risk scoring that keep the system understandable and safe to change as it
-              evolves.
+              AntiClodeX turns a product description into correct and maintainable AI-generated
+              software using natural-language specs, skills, visual preview, simulation, and formal methods.
             </p>
             <div className="home-landing-actions">
               <button className="btn hero-cta" onClick={login}>Log In</button>
@@ -242,16 +240,24 @@ export function Home({ projects, onCreateProject, onCheckProjectName }: HomeProp
           </div>
           <ul className="home-landing-highlights" aria-label="Core capabilities">
             <li className="home-highlight">
-              <p className="home-highlight-title">Curated architectures</p>
-              <p className="home-highlight-body">Guide system design with proven reference blueprints.</p>
+              <p className="home-highlight-title">Structured engineering flow</p>
+              <p className="home-highlight-body">
+                Move from PRDs to executable specs, then generate the system by composing skills, checks, and
+                integrations.
+              </p>
             </li>
             <li className="home-highlight">
               <p className="home-highlight-title">Visual preview and simulation</p>
               <p className="home-highlight-body">Inspect behavior before implementation decisions become costly.</p>
             </li>
             <li className="home-highlight">
-              <p className="home-highlight-title">Risk scoring</p>
-              <p className="home-highlight-body">Keep AI-generated systems understandable and safe to evolve.</p>
+              <div className="home-highlight-title-row">
+                <p className="home-highlight-title">Formal methods</p>
+                <span className="home-highlight-soon">Soon</span>
+              </div>
+              <p className="home-highlight-body">
+                Generate and verify software with formal methods so systems stay understandable and safe to evolve.
+              </p>
             </li>
           </ul>
         </section>

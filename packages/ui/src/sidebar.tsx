@@ -8,11 +8,13 @@ export function Sidebar({
   activeProjectOwner,
   activeProjectName,
   open,
+  onNavigate,
 }: {
   projects: Project[];
   activeProjectOwner?: string;
   activeProjectName?: string;
   open: boolean;
+  onNavigate?: () => void;
 }) {
   const [manualExpanded, setManualExpanded] = useState<Record<string, boolean>>({});
 
@@ -54,7 +56,10 @@ export function Sidebar({
                 <Link
                   to={`/${p.ownerHandle}/${p.name}`}
                   className="sidebar-project-link"
-                  onClick={(e: React.MouseEvent) => e.stopPropagation()}
+                  onClick={(e: React.MouseEvent) => {
+                    e.stopPropagation();
+                    onNavigate?.();
+                  }}
                 >
                   {p.ownerHandle} / {p.name}
                 </Link>
@@ -67,6 +72,7 @@ export function Sidebar({
                       key={t.id}
                       to={`/${p.ownerHandle}/${p.name}/thread/${t.projectThreadId ?? t.id}`}
                       className="sidebar-thread"
+                      onClick={() => onNavigate?.()}
                     >
                       <span className="sidebar-thread-id">#{t.projectThreadId ?? `${t.id.slice(0, 8)}`}</span>
                       <span className="sidebar-thread-title">

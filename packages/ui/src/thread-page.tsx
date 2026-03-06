@@ -525,6 +525,8 @@ function sortMatrixTopLevelNodes(a: TopologyNode, b: TopologyNode) {
 
 type TopologyOwnership = TopologyNode["ownership"];
 type TopologyBoundary = TopologyNode["boundary"];
+const ALL_TOPOLOGY_OWNERSHIPS = new Set<TopologyOwnership>(["first_party", "third_party"]);
+const ALL_TOPOLOGY_BOUNDARIES = new Set<TopologyBoundary>(["internal", "external"]);
 
 function normalizeTopologyOwnership(value: unknown): "first_party" | "third_party" | null {
   if (value === "first_party" || value === "third_party") return value;
@@ -637,6 +639,13 @@ interface FlowEndpoint {
 interface AppliedElkLayout {
   nodes: Node[];
   positions: Array<{ nodeId: string; x: number; y: number }>;
+}
+
+interface RootGroupBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 interface AutoLayoutRunOptions {
@@ -1103,18 +1112,7 @@ function buildFlowLayoutModel(
   };
 }
 
-function buildFlowNodes(
-  model: FlowLayoutModel,
-  nodeDocuments: Map<string, MatrixDocGroup>,
-  nodeArtifacts: Map<string, ArtifactRef[]>,
-  onOpenDocPicker: (nodeId: string, refType: DocKind) => void,
-  onOpenSystemPrompt: (nodeId: string, prompt?: SystemPromptMeta | null) => void,
-  onEditDoc: (doc: MatrixCellDoc, nodeId: string, concern: string) => void,
-  canEdit: boolean,
-  systemPrompt: string | null,
-  systemPromptTitle: string | null,
-  systemPrompts: SystemPromptMeta[],
-): Node[] {
+function computeFlowNodeDefaultPositions(model: FlowLayoutModel): Map<string, { x: number; y: number }> {
   const children = new Map<string, TopologyNode[]>();
   for (const node of model.visibleNodes) {
     const parentId = model.visibleParentById.get(node.id);
@@ -1167,6 +1165,24 @@ function buildFlowNodes(
       });
     });
   }
+
+  return positions;
+}
+
+function buildFlowNodes(
+  model: FlowLayoutModel,
+  nodeDocuments: Map<string, MatrixDocGroup>,
+  nodeArtifacts: Map<string, ArtifactRef[]>,
+  onOpenDocPicker: (nodeId: string, refType: DocKind) => void,
+  onOpenSystemPrompt: (nodeId: string, prompt?: SystemPromptMeta | null) => void,
+  onEditDoc: (doc: MatrixCellDoc, nodeId: string, concern: string) => void,
+  canEdit: boolean,
+  systemPrompt: string | null,
+  systemPromptTitle: string | null,
+  systemPrompts: SystemPromptMeta[],
+  rootBounds: RootGroupBounds | null,
+): Node[] {
+  const positions = computeFlowNodeDefaultPositions(model);
 
   const childFlowNodes = model.visibleNodes.map((node) => {
     const nestedChildren = (model.nestedChildrenByHost.get(node.id) ?? []).map((child) => ({
@@ -1226,6 +1242,7 @@ function buildFlowNodes(
       systemPrompt,
       systemPromptTitle,
       systemPrompts,
+      rootBounds,
     );
     if (rootGroupNode) {
       return [rootGroupNode, ...childFlowNodes];
@@ -1242,6 +1259,11 @@ const ROOT_GROUP_TOP_PADDING = 112;
 const ROOT_GROUP_PADDING_BOTTOM = 80;
 const ESTIMATED_NODE_WIDTH = 240;
 const ESTIMATED_NODE_HEIGHT = 120;
+const DEFAULT_TOPOLOGY_NODE_WIDTH = 180;
+
+function hasFinitePosition(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
 
 function resolveFlowNodeWidth(node: Node | undefined): number {
   const width =
@@ -1257,6 +1279,64 @@ function resolveFlowNodeHeight(node: Node | undefined): number {
     ?? (typeof node?.style?.height === "number" && Number.isFinite(node.style.height) ? node.style.height : null)
     ?? (typeof node?.style?.minHeight === "number" && Number.isFinite(node.style.minHeight) ? node.style.minHeight : null);
   return height ?? ESTIMATED_NODE_HEIGHT;
+}
+
+function estimateFlowNodeWidth(node: TopologyNode, model: FlowLayoutModel): number {
+  return (model.nestedChildrenByHost.get(node.id)?.length ?? 0) > 0 ? ESTIMATED_NODE_WIDTH : DEFAULT_TOPOLOGY_NODE_WIDTH;
+}
+
+function computeRootGroupBounds(
+  model: FlowLayoutModel,
+  flowNodes: Node[],
+  fallbackPositions: Map<string, { x: number; y: number }>,
+  cachedBounds: Map<string, { x: number; y: number; width: number; height: number }>,
+): RootGroupBounds | null {
+  if (model.visibleNodes.length === 0) return null;
+
+  const liveNodesById = new Map(
+    flowNodes
+      .filter((node) => node.id !== ROOT_GROUP_ID)
+      .map((node) => [node.id, node]),
+  );
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  for (const node of model.visibleNodes) {
+    const liveNode = liveNodesById.get(node.id);
+    const cachedNode = cachedBounds.get(node.id);
+    const fallbackPosition = fallbackPositions.get(node.id) ?? { x: 0, y: 0 };
+    const x = liveNode?.position.x
+      ?? cachedNode?.x
+      ?? (hasFinitePosition(node.layoutX) ? node.layoutX : fallbackPosition.x);
+    const y = liveNode?.position.y
+      ?? cachedNode?.y
+      ?? (hasFinitePosition(node.layoutY) ? node.layoutY : fallbackPosition.y);
+    const width = liveNode
+      ? resolveFlowNodeWidth(liveNode)
+      : cachedNode?.width ?? estimateFlowNodeWidth(node, model);
+    const height = liveNode
+      ? resolveFlowNodeHeight(liveNode)
+      : cachedNode?.height ?? ESTIMATED_NODE_HEIGHT;
+
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x + width);
+    maxY = Math.max(maxY, y + height);
+  }
+
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+    return null;
+  }
+
+  return {
+    x: minX - ROOT_GROUP_PADDING_LEFT,
+    y: minY - ROOT_GROUP_TOP_PADDING,
+    width: maxX - minX + ROOT_GROUP_PADDING_LEFT + ROOT_GROUP_PADDING_RIGHT,
+    height: maxY - minY + ROOT_GROUP_TOP_PADDING + ROOT_GROUP_PADDING_BOTTOM,
+  };
 }
 
 function buildElkGraph(flowNodes: Node[], topologyEdges: TopologyEdge[], model: FlowLayoutModel): ElkNode {
@@ -1347,7 +1427,36 @@ function buildRootGroupNode(
   systemPrompt: string | null,
   systemPromptTitle: string | null,
   systemPrompts: SystemPromptMeta[],
+  rootBounds: RootGroupBounds | null,
 ): Node | null {
+  if (rootBounds) {
+    return {
+      id: ROOT_GROUP_ID,
+      type: "rootGroup",
+      position: { x: rootBounds.x, y: rootBounds.y },
+      data: {
+        name: rootNode.name,
+        nodeId: rootNode.id,
+        documents,
+        artifacts,
+        canEdit,
+        onOpenDocPicker,
+        onOpenSystemPrompt,
+        onEditDoc,
+        systemPrompt,
+        systemPromptTitle,
+        systemPrompts,
+      },
+      draggable: false,
+      selectable: false,
+      connectable: false,
+      width: rootBounds.width,
+      height: rootBounds.height,
+      style: { width: rootBounds.width, height: rootBounds.height, pointerEvents: "none" as const },
+      zIndex: 0,
+    };
+  }
+
   if (childNodes.length === 0) {
     const w = 400;
     const h = 200;
@@ -2074,6 +2183,19 @@ export function ThreadPage({
     () => buildFlowLayoutModel(detail.topology.nodes, visibleOwnerships, visibleBoundaries),
     [detail.topology.nodes, visibleOwnerships, visibleBoundaries],
   );
+  const boundsLayoutModel = useMemo(
+    () => buildFlowLayoutModel(detail.topology.nodes, ALL_TOPOLOGY_OWNERSHIPS, ALL_TOPOLOGY_BOUNDARIES),
+    [detail.topology.nodes],
+  );
+  const boundsDefaultPositions = useMemo(
+    () => computeFlowNodeDefaultPositions(boundsLayoutModel),
+    [boundsLayoutModel],
+  );
+  const topologyNodeBoundsCacheRef = useRef<Map<string, { x: number; y: number; width: number; height: number }>>(new Map());
+  const initialRootGroupBounds = useMemo(
+    () => computeRootGroupBounds(boundsLayoutModel, [], boundsDefaultPositions, topologyNodeBoundsCacheRef.current),
+    [boundsLayoutModel, boundsDefaultPositions],
+  );
   const initialFlowNodes = useMemo(
     () =>
       buildFlowNodes(
@@ -2087,8 +2209,9 @@ export function ThreadPage({
         detail.systemPrompt,
         detail.systemPromptTitle,
         detail.systemPrompts,
+        initialRootGroupBounds,
       ),
-      [flowLayoutModel, nodeDocumentGroups, nodeArtifacts, openTopologyDocumentPicker, openRootPromptCreator, openEditDocumentModal, effectiveCanEdit, detail.systemPrompt, detail.systemPromptTitle, detail.systemPrompts],
+      [flowLayoutModel, nodeDocumentGroups, nodeArtifacts, openTopologyDocumentPicker, openRootPromptCreator, openEditDocumentModal, effectiveCanEdit, detail.systemPrompt, detail.systemPromptTitle, detail.systemPrompts, initialRootGroupBounds],
   );
   const [flowNodes, setFlowNodes, onFlowNodesChange] = useNodesState(initialFlowNodes);
   const flowEdges = useMemo(
@@ -2119,13 +2242,19 @@ export function ThreadPage({
         detail.systemPrompt,
         detail.systemPromptTitle,
         detail.systemPrompts,
+        computeRootGroupBounds(
+          boundsLayoutModel,
+          childNodes,
+          boundsDefaultPositions,
+          topologyNodeBoundsCacheRef.current,
+        ),
       );
       if (!updatedRootNode) return nodes;
       return nodes.some((node) => node.id === ROOT_GROUP_ID)
         ? nodes.map((node) => (node.id === ROOT_GROUP_ID ? updatedRootNode : node))
         : [updatedRootNode, ...childNodes];
     },
-    [flowLayoutModel.rootNode, nodeDocumentGroups, nodeArtifacts, effectiveCanEdit, openTopologyDocumentPicker, openRootPromptCreator, openEditDocumentModal, detail.systemPrompt, detail.systemPromptTitle, detail.systemPrompts],
+    [flowLayoutModel.rootNode, boundsLayoutModel, boundsDefaultPositions, nodeDocumentGroups, nodeArtifacts, effectiveCanEdit, openTopologyDocumentPicker, openRootPromptCreator, openEditDocumentModal, detail.systemPrompt, detail.systemPromptTitle, detail.systemPrompts],
   );
 
   const handleNodesChange = useCallback(
@@ -2144,6 +2273,24 @@ export function ThreadPage({
   useEffect(() => {
     setFlowNodes(initialFlowNodes);
   }, [initialFlowNodes, setFlowNodes]);
+
+  useEffect(() => {
+    setFlowNodes((currentNodes) => rebuildRootGroupNodeInFlow(currentNodes));
+  }, [rebuildRootGroupNodeInFlow, setFlowNodes]);
+
+  useEffect(() => {
+    const nextCache = new Map(topologyNodeBoundsCacheRef.current);
+    for (const node of flowNodes) {
+      if (node.id === ROOT_GROUP_ID) continue;
+      nextCache.set(node.id, {
+        x: node.position.x,
+        y: node.position.y,
+        width: resolveFlowNodeWidth(node),
+        height: resolveFlowNodeHeight(node),
+      });
+    }
+    topologyNodeBoundsCacheRef.current = nextCache;
+  }, [flowNodes]);
 
   useEffect(() => {
     if (!pendingAutoLayoutFitViewRef.current) return;
@@ -4036,7 +4183,7 @@ export function ThreadPage({
                 <h3>Topology</h3>
                 <div className="thread-card-actions">
                   <button
-                    className="btn-icon thread-card-action"
+                    className="btn-icon thread-card-action thread-enter-fullscreen-action"
                     type="button"
                     onClick={(e) => { e.stopPropagation(); enterFullscreen("topology"); }}
                     aria-label="Enter fullscreen topology"
@@ -4061,7 +4208,7 @@ export function ThreadPage({
                 <h3>Matrix</h3>
                 <div className="thread-card-actions">
                   <button
-                    className="btn-icon thread-card-action"
+                    className="btn-icon thread-card-action thread-enter-fullscreen-action"
                     type="button"
                     onClick={(e) => { e.stopPropagation(); enterFullscreen("matrix"); }}
                     aria-label="Enter fullscreen matrix"
@@ -4086,7 +4233,7 @@ export function ThreadPage({
                 <h3>Chat</h3>
                 <div className="thread-card-actions">
                   <button
-                    className="btn-icon thread-card-action"
+                    className="btn-icon thread-card-action thread-enter-fullscreen-action"
                     type="button"
                     onClick={(e) => { e.stopPropagation(); enterFullscreen("chat"); }}
                     aria-label="Enter fullscreen history"
@@ -4111,7 +4258,7 @@ export function ThreadPage({
                 <h3>Simulation</h3>
                 <div className="thread-card-actions">
                   <button
-                    className="btn-icon thread-card-action"
+                    className="btn-icon thread-card-action thread-enter-fullscreen-action"
                     type="button"
                     onClick={(e) => { e.stopPropagation(); enterFullscreen("simulation"); }}
                     aria-label="Enter fullscreen simulation"

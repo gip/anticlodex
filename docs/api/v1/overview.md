@@ -85,12 +85,21 @@ Query helpers:
 
 - `GET /v1/integrations`  
 - `GET /v1/integrations/:provider/authorize-url`
+- `GET /v1/integrations/:provider/callback`
 - `GET /v1/integrations/:provider/status`
 
 - `GET /v1/events?since=<cursor|timestamp>&limit=<n>`
 - `GET /v1/events/stream?since=<cursor|timestamp>`
 
 ## Event model
+
+## OAuth callback URLs
+
+- Provider redirect URIs must target the API base URL, not the SPA origin.
+- Canonical callbacks:
+  - `/v1/integrations/notion/callback`
+  - `/v1/integrations/google/callback`
+- If the API is accessed through a public origin that differs from the inbound request host, set `INTEGRATION_OAUTH_CALLBACK_ORIGIN` so OAuth providers receive the externally registered API origin.
 
 Shared event payload:
 

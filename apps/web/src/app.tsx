@@ -367,6 +367,31 @@ type MatrixRefMutationResponse = {
   messages?: ChatMessage[];
 };
 
+interface MatrixRefInput {
+  nodeId: string;
+  concern: string;
+  concerns?: string[];
+  docHash: string;
+  refType: "Document" | "Skill" | "Prompt";
+}
+
+interface MatrixDocumentCreateInput {
+  title: string;
+  kind: "Document" | "Skill" | "Prompt";
+  language: string;
+  sourceType: "local" | "notion" | "google_doc";
+  sourceUrl?: string;
+  name?: string;
+  description?: string;
+  body?: string;
+  attach?: {
+    nodeId: string;
+    concern?: string;
+    concerns?: string[];
+    refType: "Document" | "Skill" | "Prompt";
+  };
+}
+
 interface MatrixDocumentCreateResponse {
   systemId: string;
   document: MatrixDocument;
@@ -380,6 +405,14 @@ interface MatrixDocumentCreateResponse {
     text: string;
   }>;
   messages?: ChatMessage[];
+}
+
+interface MatrixDocumentReplaceInput {
+  title?: string;
+  name?: string;
+  description?: string;
+  language?: string;
+  body?: string;
 }
 
 interface MatrixDocumentReplaceResponse {
@@ -473,6 +506,34 @@ function mergeChatMessages(current: ChatMessage[], incoming: ChatMessage[]) {
   const existing = new Set(current.map((message) => message.id));
   const next = incoming.filter((message) => !existing.has(message.id));
   return [...current, ...next];
+}
+
+function applyMatrixMutationResponse(
+  detail: ThreadDetailPayload,
+  response: MatrixRefMutationResponse,
+): ThreadDetailPayload {
+  const nextCells = normalizeMutationCells(response);
+  return {
+    ...detail,
+    systemId: response.systemId,
+    matrix: nextCells.length === 0
+      ? detail.matrix
+      : {
+          ...detail.matrix,
+          cells: applyMutationCells(detail.matrix.cells, nextCells),
+        },
+    chat: {
+      ...detail.chat,
+      messages: mergeChatMessages(detail.chat.messages, response.messages ?? []),
+    },
+    ...(response.systemPrompt === undefined
+      ? {}
+      : {
+          systemPrompt: response.systemPrompt ?? null,
+          systemPromptTitle: response.systemPromptTitle ?? null,
+          systemPrompts: response.systemPrompts ?? [],
+        }),
+  };
 }
 
 function applyTopologyPositions(
@@ -1676,10 +1737,157 @@ function ThreadRoute({ onProjectMutated }: { onProjectMutated?: () => void }) {
         ));
         return data;
       }}
-      onAddMatrixDoc={undefined}
-      onRemoveMatrixDoc={undefined}
-      onCreateMatrixDocument={undefined}
-      onReplaceMatrixDocument={undefined}
+      onAddMatrixDoc={async (payload: MatrixRefInput) => {
+        const scopedPath = threadPathWithScope("/matrix/refs");
+        if (!scopedPath) {
+          return { error: "Unable to determine thread context." };
+        }
+        const res = await apiFetch(
+          scopedPath,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          },
+        );
+        if (!res.ok) {
+          return { error: await readError(res, "Failed to attach document") };
+        }
+        const data = (await res.json()) as MatrixRefMutationResponse;
+        setDetail((prev) => (prev ? applyMatrixMutationResponse(prev, data) : prev));
+        return data;
+      }}
+      onRemoveMatrixDoc={async (payload: MatrixRefInput) => {
+        const scopedPath = threadPathWithScope("/matrix/refs");
+        if (!scopedPath) {
+          return { error: "Unable to determine thread context." };
+        }
+        const res = await apiFetch(
+          scopedPath,
+          {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          },
+        );
+        if (!res.ok) {
+          return { error: await readError(res, "Failed to remove document") };
+        }
+        const data = (await res.json()) as MatrixRefMutationResponse;
+        setDetail((prev) => (prev ? applyMatrixMutationResponse(prev, data) : prev));
+        return data;
+      }}
+      onCreateMatrixDocument={async (payload: MatrixDocumentCreateInput) => {
+        const scopedPath = threadPathWithScope("/matrix/documents");
+        if (!scopedPath) {
+          return { error: "Unable to determine thread context." };
+        }
+        const res = await apiFetch(
+          scopedPath,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          },
+        );
+        if (!res.ok) {
+          return { error: await readError(res, "Failed to create document") };
+        }
+        const data = (await res.json()) as MatrixDocumentCreateResponse;
+        setDetail((prev) => {
+          if (!prev) return prev;
+
+          const responseCells = normalizeMutationCells(data);
+          const attach = payload.attach;
+          const attachConcerns = getAttachConcerns(attach);
+          const fallbackAttach: { nodeId: string; refType: "Document" | "Skill" } | null =
+            attach && (attach.refType === "Document" || attach.refType === "Skill")
+              ? { nodeId: attach.nodeId, refType: attach.refType }
+            : null;
+          const fallbackCells = payload.kind !== "Prompt" && fallbackAttach && responseCells.length === 0
+            ? buildFallbackAttachedCells(
+                prev.matrix.cells,
+                fallbackAttach.nodeId,
+                attachConcerns,
+                fallbackAttach.refType,
+                data.document,
+              )
+            : [];
+          const nextCells = responseCells.length > 0 ? responseCells : fallbackCells;
+
+          return {
+            ...prev,
+            systemId: data.systemId,
+            matrix: payload.kind === "Prompt"
+              ? prev.matrix
+              : {
+                  ...prev.matrix,
+                  documents: upsertMatrixDocument(prev.matrix.documents, data.document),
+                  cells: nextCells.length === 0
+                    ? prev.matrix.cells
+                    : applyMutationCells(prev.matrix.cells, nextCells),
+                },
+            chat: {
+              ...prev.chat,
+              messages: mergeChatMessages(prev.chat.messages, data.messages ?? []),
+            },
+            ...(data.systemPrompt === undefined
+              ? {}
+              : {
+                  systemPrompt: data.systemPrompt ?? null,
+                  systemPromptTitle: data.systemPromptTitle ?? null,
+                  systemPrompts: data.systemPrompts ?? [],
+                }),
+          };
+        });
+        return data;
+      }}
+      onReplaceMatrixDocument={async (documentHash: string, payload: MatrixDocumentReplaceInput) => {
+        const scopedPath = threadPathWithScope(`/matrix/documents/${encodeURIComponent(documentHash)}`);
+        if (!scopedPath) {
+          return { error: "Unable to determine thread context." };
+        }
+        const res = await apiFetch(
+          scopedPath,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          },
+        );
+        if (!res.ok) {
+          return { error: await readError(res, "Failed to update document") };
+        }
+        const data = (await res.json()) as MatrixDocumentReplaceResponse;
+        setDetail((prev) => {
+          if (!prev) return prev;
+
+          const isPromptDocument = data.systemPrompt !== undefined;
+          return {
+            ...prev,
+            systemId: data.systemId,
+            matrix: isPromptDocument
+              ? prev.matrix
+              : {
+                  ...prev.matrix,
+                  documents: replaceMatrixDocumentInGlobalList(prev.matrix.documents, data.oldHash, data.document),
+                  cells: replaceMatrixDocumentReferences(prev.matrix.cells, data.oldHash, data.document),
+                },
+            chat: {
+              ...prev.chat,
+              messages: mergeChatMessages(prev.chat.messages, data.messages ?? []),
+            },
+            ...(data.systemPrompt === undefined
+              ? {}
+              : {
+                  systemPrompt: data.systemPrompt ?? null,
+                  systemPromptTitle: data.systemPromptTitle ?? null,
+                  systemPrompts: data.systemPrompts ?? [],
+                }),
+          };
+        });
+        return data;
+      }}
       onSendChatMessage={async (payload) => {
         const scopedPath = threadPathWithScope("/chat");
         if (!scopedPath) {

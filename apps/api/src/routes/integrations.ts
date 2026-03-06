@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
+import { withApiPrefix } from "../api-prefix.js";
 import { query } from "../db.js";
 import { verifyAuth } from "../auth.js";
 import { decryptToken, encryptToken } from "../integrations/crypto.js";
@@ -36,16 +37,18 @@ interface IntegrationCallbackQuery {
   code?: string;
 }
 
+interface RequestOriginContext {
+  protocol: string;
+  headers: { host?: string | string[]; origin?: string | string[]; referer?: string | string[] };
+}
+
 function firstHeaderValue(value: string | string[] | undefined): string | null {
   if (!value) return null;
   return Array.isArray(value) ? (value[0] ?? null) : value;
 }
 
 function getIntegrationFrontendOrigin(
-  req: {
-    protocol: string;
-    headers: { host?: string | string[]; origin?: string | string[]; referer?: string | string[] };
-  },
+  req: RequestOriginContext,
 ): string {
   const explicit = process.env.INTEGRATION_CALLBACK_ORIGIN?.trim();
   if (explicit) return explicit;
@@ -71,10 +74,7 @@ function randomState(): string {
 
 function sanitizeReturnTo(
   raw: string | undefined,
-  req: {
-    protocol: string;
-    headers: { host?: string | string[]; origin?: string | string[]; referer?: string | string[] };
-  },
+  req: RequestOriginContext,
 ): string {
   const fallbackOrigin = getIntegrationFrontendOrigin(req);
   if (!raw) return fallbackOrigin;
@@ -99,6 +99,25 @@ function sanitizeReturnTo(
 function protocolHost(req: { protocol: string; headers: { host?: string | string[] } }): string {
   const host = Array.isArray(req.headers.host) ? req.headers.host[0] : req.headers.host;
   return `${req.protocol}://${host || "localhost:3001"}`;
+}
+
+function getIntegrationCallbackOrigin(
+  req: { protocol: string; headers: { host?: string | string[] } },
+): string {
+  const explicit = process.env.INTEGRATION_OAUTH_CALLBACK_ORIGIN?.trim();
+  if (explicit) return explicit.replace(/\/+$/, "");
+  return protocolHost(req);
+}
+
+export function integrationCallbackPath(provider: IntegrationProvider): string {
+  return withApiPrefix(`/integrations/${provider}/callback`);
+}
+
+export function buildIntegrationCallbackUrl(
+  req: { protocol: string; headers: { host?: string | string[] } },
+  provider: IntegrationProvider,
+): string {
+  return `${getIntegrationCallbackOrigin(req)}${integrationCallbackPath(provider)}`;
 }
 
 function integrationStatusValue(
@@ -128,7 +147,7 @@ export async function integrationsRoutes(app: FastifyInstance) {
       const returnTo = sanitizeReturnTo(req.query.returnTo, req);
       const state = randomState();
       const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-      const redirectUri = `${protocolHost(req)}/integrations/${rawProvider}/callback`;
+      const redirectUri = buildIntegrationCallbackUrl(req, rawProvider);
 
       await query(
         `INSERT INTO integration_oauth_states (state, user_id, provider, return_to, issued_at, expires_at)
@@ -154,7 +173,7 @@ export async function integrationsRoutes(app: FastifyInstance) {
       const returnTo = sanitizeReturnTo(req.query.returnTo, req);
       const state = randomState();
       const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-      const redirectUri = `${protocolHost(req)}/integrations/${rawProvider}/callback`;
+      const redirectUri = buildIntegrationCallbackUrl(req, rawProvider);
 
       await query(
         `INSERT INTO integration_oauth_states (state, user_id, provider, return_to, issued_at, expires_at)
@@ -199,7 +218,7 @@ export async function integrationsRoutes(app: FastifyInstance) {
       }
 
       const client = getProviderClient(rawProvider);
-      const redirectUri = `${protocolHost(req)}/integrations/${rawProvider}/callback`;
+      const redirectUri = buildIntegrationCallbackUrl(req, rawProvider);
       const tokens = await client.exchangeCode(code, redirectUri);
 
       await query(

@@ -7,6 +7,7 @@
     "dev": "tsx watch --env-file=.env.local src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
+    "test": "AUTH0_DOMAIN=example.auth0.com AUTH0_AUDIENCE=test-audience node --import tsx --test src/**/*.test.ts",
     "migrate": "node-pg-migrate up --config node-pg-migrate.config.cjs --migrations-dir db/migrations",
     "migrate:status": "node-pg-migrate up --dry-run --config node-pg-migrate.config.cjs --migrations-dir db/migrations",
     "migrate:down:last": "node-pg-migrate down 1 --config node-pg-migrate.config.cjs --migrations-dir db/migrations"

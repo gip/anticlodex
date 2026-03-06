@@ -7,6 +7,7 @@ import { userRoutes } from "./routes/users.js";
 import { v1Routes } from "./routes/v1.js";
 import { integrationsRoutes } from "./routes/integrations.js";
 import { startAgentRunner } from "./agent-runner.js";
+import { API_V1_PREFIX } from "./api-prefix.js";
 
 const port = Number(process.env.PORT ?? 3001);
 const app = Fastify({ logger: true });
@@ -22,7 +23,7 @@ await app.register(async (subApp) => {
     await subApp.register(integrationsRoutes);
     await subApp.register(v1Routes);
     await subApp.register(userRoutes);
-  }, { prefix: "/v1" });
+  }, { prefix: API_V1_PREFIX });
 
 const stopAgentRunner = isClaudeAgentEnabled
   ? startAgentRunner({

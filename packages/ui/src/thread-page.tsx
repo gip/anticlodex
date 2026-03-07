@@ -128,7 +128,7 @@ export type AssistantRunMode = "direct" | "plan";
 
 export type AssistantExecutor = "backend" | "desktop";
 
-type AssistantModel = "claude-opus-4-6" | "claude-sonnet-4-6" | "codex-5.3";
+type AssistantModel = "claude-opus-4-6" | "claude-sonnet-4-6" | "codex-5.3" | "gpt-5.4";
 
 interface AssistantModelOption {
   key: AssistantModel;
@@ -139,6 +139,7 @@ const ASSISTANT_MODELS: AssistantModelOption[] = [
   { key: "claude-opus-4-6", label: "Opus 4.6" },
   { key: "claude-sonnet-4-6", label: "Sonnet 4.6" },
   { key: "codex-5.3", label: "Codex 5.3" },
+  { key: "gpt-5.4", label: "GPT 5.4" },
 ];
 
 const DEFAULT_ASSISTANT_MODEL: AssistantModel = "claude-opus-4-6";

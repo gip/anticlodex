@@ -11,7 +11,8 @@ const DEFAULT_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"] as const
 const DEFAULT_MODEL = "claude-opus-4-6";
 const CODEX_MODEL = "gpt-5.3-codex";
 const LEGACY_CODEX_MODEL = "codex-5.3";
-const ALLOWED_ASSISTANT_MODELS = ["claude-opus-4-6", "claude-sonnet-4-6", CODEX_MODEL, LEGACY_CODEX_MODEL] as const;
+const GPT_5_4_MODEL = "gpt-5.4";
+const ALLOWED_ASSISTANT_MODELS = ["claude-opus-4-6", "claude-sonnet-4-6", CODEX_MODEL, LEGACY_CODEX_MODEL, GPT_5_4_MODEL] as const;
 type AssistantModel = (typeof ALLOWED_ASSISTANT_MODELS)[number];
 export type AgentProvider = "claude" | "codex" | "unknown";
 
@@ -58,9 +59,10 @@ export interface ResolveThreadWorkspacePathInput {
 }
 
 function normalizeAssistantModel(rawModel: string | undefined): AssistantModel {
-  return rawModel === "claude-sonnet-4-6" || rawModel === CODEX_MODEL || rawModel === LEGACY_CODEX_MODEL
-    ? CODEX_MODEL
-    : DEFAULT_MODEL;
+  if (rawModel === "claude-sonnet-4-6") return "claude-sonnet-4-6";
+  if (rawModel === CODEX_MODEL || rawModel === LEGACY_CODEX_MODEL) return CODEX_MODEL;
+  if (rawModel === GPT_5_4_MODEL) return GPT_5_4_MODEL;
+  return DEFAULT_MODEL;
 }
 
 interface BaseRunAgentInput {
@@ -111,10 +113,11 @@ async function runCodexAgent(input: BaseRunAgentInput): Promise<AgentRunResult> 
   try {
     const { Codex } = await import("@openai/codex-sdk");
     const options: CodexOptions = {}
+    const model = normalizeAssistantModel(input.model);
 
     const codex = new Codex(options);
     const thread = codex.startThread({
-      model: CODEX_MODEL,
+      model,
       workingDirectory: input.cwd,
       skipGitRepoCheck: true,
       sandboxMode: 'workspace-write',
@@ -150,8 +153,11 @@ export interface RunAgentInput extends BaseRunAgentInput {
 
 export async function runAgent(input: RunAgentInput): Promise<AgentRunResult> {
   const model = normalizeAssistantModel(input.model);
-  if (model === CODEX_MODEL) {
-    return runCodexAgent(input);
+  if (model === CODEX_MODEL || model === GPT_5_4_MODEL) {
+    return runCodexAgent({
+      ...input,
+      model,
+    });
   }
   return runClaudeAgent({
     ...input,

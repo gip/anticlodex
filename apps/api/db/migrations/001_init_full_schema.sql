@@ -506,7 +506,7 @@ create table if not exists agent_runs (
   thread_id text not null references threads(id) on delete cascade,
   project_id text not null references projects(id) on delete cascade,
   requested_by_user_id uuid references users(id) on delete set null,
-  model text not null default 'claude-opus-4-6' check (model in ('claude-opus-4-6', 'claude-sonnet-4-6', 'codex-5.3')),
+  model text not null,
   mode text not null check (mode in ('direct', 'plan')),
   plan_action_id text,
   chat_message_id text,

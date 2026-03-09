@@ -243,15 +243,16 @@ export function Home({ projects, onCreateProject, onCheckProjectName }: HomeProp
             <li className="home-highlight">
               <p className="home-highlight-title">Built for correctness</p>
               <p className="home-highlight-body">
-                ACX is designed around one goal: helping teams create systems that behave as
-                intended.
+                AntiClodeX is designed around one goal: helping teams create systems that behave
+                as intended.
               </p>
             </li>
             <li className="home-highlight">
-              <p className="home-highlight-title">Work, not just output</p>
+              <p className="home-highlight-title">System design and simulation</p>
               <p className="home-highlight-body">
-                Instead of treating generation as a one-shot act, the system creates structured
-                work that can be reused, improved, and checked over time.
+                Topology can be inspected, and the full system can be simulated before
+                deployment—so teams can understand behavior, test assumptions, and improve
+                generated systems before they are trusted.
               </p>
             </li>
             <li className="home-highlight">

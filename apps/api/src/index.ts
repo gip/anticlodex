@@ -1,6 +1,10 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { close } from "./db.js";
+import {
+  createRedisAnonymousResponseCache,
+  registerAnonymousResponseCache,
+} from "./anonymous-cache.js";
 import { healthRoutes } from "./routes/health.js";
 import { meRoutes } from "./routes/me.js";
 import { userRoutes } from "./routes/users.js";
@@ -14,6 +18,9 @@ const app = Fastify({ logger: true });
 const isClaudeAgentEnabled = process.env.ACX_ENABLE_CLAUDE_AGENT === "1";
 const apiPollMsRaw = Number(process.env.ACX_AGENT_RUNNER_POLL_MS ?? "1000");
 const apiPollMs = Number.isFinite(apiPollMsRaw) && apiPollMsRaw > 0 ? apiPollMsRaw : 1000;
+const anonymousCache = await createRedisAnonymousResponseCache(app.log);
+
+registerAnonymousResponseCache(app, anonymousCache);
 
 await app.register(cors, { origin: true, methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE"] });
 
@@ -42,6 +49,7 @@ try {
 } catch (err) {
   app.log.error(err);
   stopAgentRunner();
+  await anonymousCache.store?.close();
   await close();
   process.exit(1);
 }
@@ -49,6 +57,7 @@ try {
 const shutdown = async () => {
   stopAgentRunner();
   await app.close();
+  await anonymousCache.store?.close();
   await close();
 };
 

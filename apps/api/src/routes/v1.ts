@@ -1342,6 +1342,7 @@ export async function v1Routes(app: FastifyInstance) {
 
   app.get<{ Querystring: { page?: number; pageSize?: number; name?: string } }>(
     "/projects",
+    { config: { anonymousCache: true } },
     async (req, reply) => {
       const viewerUserId = getOptionalAuthUser(req)?.id ?? null;
       const page = parsePositiveInt(req.query.page, 1, 1, Number.MAX_SAFE_INTEGER);
@@ -2197,6 +2198,7 @@ export async function v1Routes(app: FastifyInstance) {
 
   app.get<{ Querystring: { projectId?: string; page?: number; pageSize?: number } }>(
     "/threads",
+    { config: { anonymousCache: true } },
     async (req, reply) => {
       const viewerUserId = getOptionalAuthUser(req)?.id ?? null;
       const page = parsePositiveInt(req.query.page, 1, 1, Number.MAX_SAFE_INTEGER);
@@ -2382,6 +2384,7 @@ export async function v1Routes(app: FastifyInstance) {
 
   app.get<{ Params: { threadId: string }; Querystring: V1ThreadScopeQuerystring }>(
     "/threads/:threadId",
+    { config: { anonymousCache: true } },
     async (req, reply) => {
       const viewerUserId = getOptionalAuthUser(req)?.id ?? null;
       const threadId = req.params.threadId;

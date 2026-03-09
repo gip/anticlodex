@@ -50,6 +50,7 @@ export async function userRoutes(app: FastifyInstance) {
 
   app.get<{ Params: { handle: string } }>(
     "/users/:handle",
+    { config: { anonymousCache: true } },
     async (req, reply) => {
       await verifyOptionalAuth(req, reply);
       if (reply.sent) return;

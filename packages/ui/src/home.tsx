@@ -231,7 +231,7 @@ export function Home({ projects, onCreateProject, onCheckProjectName }: HomeProp
               Correct AI-generated software.
             </h1>
             <p className="home-landing-copy">
-              AntiClodeX is an experiment in helping teams build and maintain large software
+              AntiClodeX is an experiment in helping small teams build and maintain large software
               systems by making more of the engineering process visible—including system design,
               coding agents, simulation, and verification methods.
             </p>

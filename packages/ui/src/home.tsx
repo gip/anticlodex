@@ -231,9 +231,9 @@ export function Home({ projects, onCreateProject, onCheckProjectName }: HomeProp
               Correct AI-generated software.
             </h1>
             <p className="home-landing-copy">
-              AntiClodeX is an experiment in delivering correct AI-generated software by turning
-              product intent into structured work that can be generated, refined, and validated
-              over time.
+              AntiClodeX is an experiment in helping teams build and maintain large software
+              systems by making more of the engineering process visible—including system design,
+              coding agents, simulation, and verification methods.
             </p>
             <div className="home-landing-actions">
               <button className="btn hero-cta" onClick={login}>Log In</button>
@@ -241,28 +241,29 @@ export function Home({ projects, onCreateProject, onCheckProjectName }: HomeProp
           </div>
           <ul className="home-landing-highlights" aria-label="Core capabilities">
             <li className="home-highlight">
-              <p className="home-highlight-title">Built for correctness</p>
+              <p className="home-highlight-title">Built for correctness at scale</p>
               <p className="home-highlight-body">
-                AntiClodeX is designed around one goal: helping teams create systems that behave
-                as intended.
+                AntiClodeX is designed to help teams build and maintain large software systems
+                that behave as intended.
               </p>
             </li>
             <li className="home-highlight">
               <p className="home-highlight-title">System design and simulation</p>
               <p className="home-highlight-body">
-                Topology can be inspected, and the full system can be simulated before
-                deployment—so teams can understand behavior, test assumptions, and improve
-                generated systems before they are trusted.
+                System topology can be inspected, and full-system behavior can be simulated before
+                deployment—so teams can understand, test, and improve systems before they are
+                trusted.
               </p>
             </li>
             <li className="home-highlight">
               <div className="home-highlight-title-row">
-                <p className="home-highlight-title">Stronger guarantees ahead</p>
+                <p className="home-highlight-title">Methods made visible</p>
                 <span className="home-highlight-soon">Soon</span>
               </div>
               <p className="home-highlight-body">
-                Our roadmap includes formal methods and deeper verification to push from reliability
-                toward correctness.
+                Coding agents, simulation, and formal methods should be visible parts of the
+                engineering process, so teams can apply stronger methods to move systems toward
+                correctness.
               </p>
             </li>
           </ul>

@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, nativeImage } from "electron";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { startAssistantRunLocal } from "./agent.js";
-import { getAccessToken, getAuthState, login, logout, notifyRenderer } from "./auth.js";
+import { getAuthState, getValidAccessToken, login, logout, notifyRenderer, onAuthStateChanged } from "./auth.js";
 
 let mainWindow: BrowserWindow | null = null;
 let appIcon: Electron.NativeImage | null = null;
@@ -66,7 +66,7 @@ function createWindow() {
 
 // Auth IPC handlers
 ipcMain.handle("auth:get-state", () => getAuthState());
-ipcMain.handle("auth:get-token", () => getAccessToken());
+ipcMain.handle("auth:get-valid-token", (_event, options?: { forceRefresh?: boolean }) => getValidAccessToken(options));
 ipcMain.handle("assistant:run", async (_event, payload: {
   handle: string;
   projectName: string;
@@ -83,18 +83,19 @@ ipcMain.handle("assistant:run", async (_event, payload: {
 ipcMain.on("auth:login", async () => {
   const success = await login();
   if (success && mainWindow) {
-    notifyRenderer(mainWindow);
     mainWindow.focus();
   }
 });
 
 ipcMain.on("auth:logout", async () => {
   await logout();
-  if (mainWindow) notifyRenderer(mainWindow);
 });
 
 app.whenReady().then(() => {
   createWindow();
+  onAuthStateChanged(() => {
+    if (mainWindow) notifyRenderer(mainWindow);
+  });
   console.info("[desktop] agent task processing enabled", { enabled: isClaudeAgentEnabled });
 });
 

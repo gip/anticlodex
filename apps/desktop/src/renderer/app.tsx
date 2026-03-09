@@ -286,7 +286,7 @@ function toEnvelopePayload<T>(raw: {
 
 interface ElectronAuthAPI {
   getState: () => Promise<{ isAuthenticated: boolean }>;
-  getAccessToken: () => Promise<string | null>;
+  getValidAccessToken: (options?: { forceRefresh?: boolean }) => Promise<string | null>;
   login: () => void;
   logout: () => void;
   onStateChanged: (cb: (state: { isAuthenticated: boolean }) => void) => () => void;
@@ -648,17 +648,34 @@ async function readError(res: Response, fallback: string) {
   return fallback;
 }
 
+async function desktopApiFetch(path: string, init?: RequestInit): Promise<Response> {
+  const request = async (forceRefresh = false) => {
+    const token = await window.electronAPI.auth.getValidAccessToken({ forceRefresh });
+    if (!token) throw new Error("Not authenticated");
+
+    const headers = new Headers(init?.headers ?? {});
+    headers.set("Authorization", `Bearer ${token}`);
+
+    return fetch(`${API_URL}${path}`, {
+      ...init,
+      headers,
+    });
+  };
+
+  let response = await request();
+  if (response.status === 401) {
+    response = await request(true);
+    if (response.status === 401) {
+      window.electronAPI.auth.logout();
+    }
+  }
+
+  return response;
+}
+
 function useApi() {
   const apiFetch = useCallback(
-    async (path: string, init?: RequestInit) => {
-      const token = await window.electronAPI.auth.getAccessToken();
-      if (!token) throw new Error("Not authenticated");
-
-      return fetch(`${API_URL}${path}`, {
-        ...init,
-        headers: { Authorization: `Bearer ${token}`, ...init?.headers },
-      });
-    },
+    async (path: string, init?: RequestInit) => desktopApiFetch(path, init),
     [],
   );
 
@@ -2266,19 +2283,8 @@ export function App() {
       return;
     }
 
-    const { auth } = window.electronAPI;
-
-    auth.getAccessToken().then(async (token) => {
-      if (!token) return;
-
-      const headers = { Authorization: `Bearer ${token}` };
-
-      try {
-        const [meRes, projRes] = await Promise.all([
-          fetch(`${API_URL}/me`, { headers }),
-          fetch(`${API_URL}/projects`, { headers }),
-        ]);
-
+    Promise.all([desktopApiFetch("/me"), desktopApiFetch("/projects")])
+      .then(async ([meRes, projRes]) => {
         if (meRes.ok) {
           const me = await meRes.json();
           setUser({ handle: me.handle, email: me.email ?? null, githubHandle: me.githubHandle ?? "", name: me.name, picture: me.picture });
@@ -2288,10 +2294,10 @@ export function App() {
           const projectsData = (await projRes.json()) as V1ProjectListResponse;
           setProjects(toEnvelopePayload(projectsData).items.map((project) => normalizeProject(project)));
         }
-      } catch (err) {
+      })
+      .catch((err) => {
         console.error("API fetch failed:", err);
-      }
-    });
+      });
   }, [isAuthenticated, projectsKey]);
 
   return (

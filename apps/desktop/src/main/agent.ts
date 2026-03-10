@@ -8,7 +8,7 @@ import {
   snapshotOpenShipBundle,
   type AgentRuntimeMessage,
 } from "@acx/agent-runtime";
-import { getAccessToken } from "./auth.js";
+import { getValidAccessToken, logout } from "./auth.js";
 
 function normalizeApiUrl(raw: string): string {
   const trimmed = raw.trim().replace(/\/+$/, "");
@@ -258,7 +258,7 @@ function getMessageType(message: AgentRuntimeMessage): string {
 }
 
 async function getWorkspaceAccessToken(): Promise<string> {
-  const token = await getAccessToken();
+  const token = await getValidAccessToken();
   if (!token) {
     throw new Error("Not authenticated");
   }
@@ -266,24 +266,39 @@ async function getWorkspaceAccessToken(): Promise<string> {
 }
 
 async function apiRequest<T>(
-  token: string,
   path: string,
   options: Omit<RequestInit, "headers"> & { body?: string | object | null } = {},
 ): Promise<T> {
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
+  const request = async (forceRefresh = false) => {
+    const token = await getValidAccessToken({ forceRefresh });
+    if (!token) {
+      throw new Error("Not authenticated");
+    }
+
+    return fetch(`${API_URL}${path}`, {
+      ...options,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(typeof options.headers === "object" && options.headers !== null
+          ? options.headers as Record<string, string>
+          : {}),
+      },
+      body:
+        typeof options.body === "string"
+          ? options.body
+          : options.body === undefined || options.body === null
+            ? undefined
+            : JSON.stringify(options.body),
+    });
   };
 
-  const response = await fetch(`${API_URL}${path}`, {
-    ...options,
-    headers: {
-      ...headers,
-      ...(typeof options.headers === "object" && options.headers !== null
-        ? options.headers as Record<string, string>
-        : {}),
-    },
-    body: typeof options.body === "string" ? options.body : options.body === undefined || options.body === null ? undefined : JSON.stringify(options.body),
-  });
+  let response = await request();
+  if (response.status === 401) {
+    response = await request(true);
+    if (response.status === 401) {
+      await logout();
+    }
+  }
 
   if (!response.ok) {
     const body = await response.text().catch(() => "");
@@ -332,7 +347,6 @@ function buildRunSummary(changes: AssistantRunCompleteRequest["changes"]): strin
 }
 
 async function completeRun(
-  token: string,
   handle: string,
   projectName: string,
   threadId: string,
@@ -340,7 +354,6 @@ async function completeRun(
   payload: AssistantRunCompleteRequest,
 ) {
   await apiRequest<{ runId: string }>(
-    token,
     `/assistant-runs/${encodeURIComponent(runId)}/complete`,
     {
       method: "POST",
@@ -350,7 +363,6 @@ async function completeRun(
   );
 
   return await apiRequest<AssistantRunResultResponse>(
-    token,
     `/assistant-runs/${encodeURIComponent(runId)}`,
     { method: "GET" },
   );
@@ -365,12 +377,11 @@ export async function startAssistantRunLocal(payload: {
 }): Promise<unknown> {
   const toError = (error: unknown): string =>
     error instanceof Error ? error.message : typeof error === "string" ? error : "Failed to execute local agent run.";
-  const token = await getWorkspaceAccessToken();
+  await getWorkspaceAccessToken();
   const runnerId = `${DEFAULT_RUNNER_ID}-${randomUUID()}`;
   let claimPayload: AssistantRunClaimResponse;
   try {
     claimPayload = await apiRequest<AssistantRunClaimResponse>(
-      token,
       `/assistant-runs/${encodeURIComponent(payload.runId)}/claim`,
       {
         method: "POST",
@@ -383,7 +394,6 @@ export async function startAssistantRunLocal(payload: {
       if (message.includes("HTTP 409") || message.includes("Run is not available for claiming")) {
         try {
           return await apiRequest<unknown>(
-            token,
             `/assistant-runs/${encodeURIComponent(payload.runId)}`,
             { method: "GET" },
           );
@@ -411,7 +421,6 @@ export async function startAssistantRunLocal(payload: {
   if (claimPayload.status !== "running" && claimPayload.status !== "queued") {
     try {
       return await apiRequest<unknown>(
-        token,
         `/assistant-runs/${encodeURIComponent(payload.runId)}`,
         { method: "GET" },
       );
@@ -427,7 +436,6 @@ export async function startAssistantRunLocal(payload: {
   let descriptor: OpenShipBundleDescriptor;
   try {
     descriptor = await apiRequest<OpenShipBundleDescriptor>(
-      token,
       bundlePath,
       {
         method: "GET",
@@ -543,7 +551,7 @@ export async function startAssistantRunLocal(payload: {
         status: "failed",
         reason: snapshotFailure,
       });
-      return await completeRun(token, payload.handle, payload.projectName, payload.threadId, payload.runId, {
+      return await completeRun(payload.handle, payload.projectName, payload.threadId, payload.runId, {
         status: "failed",
         messages: [...messages, snapshotFailure],
         changes,
@@ -554,7 +562,7 @@ export async function startAssistantRunLocal(payload: {
   }
 
   try {
-    const completionResult = await completeRun(token, payload.handle, payload.projectName, payload.threadId, payload.runId, {
+    const completionResult = await completeRun(payload.handle, payload.projectName, payload.threadId, payload.runId, {
       status: runResult.status,
       messages,
       changes,

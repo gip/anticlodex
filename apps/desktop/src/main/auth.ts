@@ -14,10 +14,25 @@ function normalizeApiUrl(raw: string): string {
 const API_URL = normalizeApiUrl(import.meta.env.VITE_API_URL ?? "http://localhost:3001");
 const CALLBACK_PORT = 17823;
 const REDIRECT_URI = `http://127.0.0.1:${CALLBACK_PORT}`;
+const ACCESS_TOKEN_BUFFER_MS = 60_000;
 
-let accessToken: string | null = null;
+interface AuthSession {
+  accessToken: string;
+  refreshToken: string | null;
+  expiresAt: number | null;
+}
+
+interface TokenResponse {
+  access_token: string;
+  refresh_token?: string;
+  expires_in?: number;
+}
+
+let session: AuthSession | null = null;
 let codeVerifier: string | null = null;
 let callbackServer: Server | null = null;
+let refreshInFlight: Promise<string | null> | null = null;
+const authStateListeners = new Set<() => void>();
 
 function base64url(buffer: Buffer): string {
   return buffer.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -32,11 +47,127 @@ function generateCodeChallenge(verifier: string): string {
 }
 
 export function getAuthState() {
-  return { isAuthenticated: accessToken !== null };
+  return { isAuthenticated: session !== null };
 }
 
-export function getAccessToken(): string | null {
-  return accessToken;
+function emitAuthStateChanged() {
+  for (const listener of authStateListeners) {
+    try {
+      listener();
+    } catch (err) {
+      console.error("Auth state listener failed:", err);
+    }
+  }
+}
+
+function setSession(nextSession: AuthSession | null) {
+  const previousToken = session?.accessToken ?? null;
+  const nextToken = nextSession?.accessToken ?? null;
+  const previousRefreshToken = session?.refreshToken ?? null;
+  const nextRefreshToken = nextSession?.refreshToken ?? null;
+  const previousExpiry = session?.expiresAt ?? null;
+  const nextExpiry = nextSession?.expiresAt ?? null;
+
+  session = nextSession;
+
+  if (
+    previousToken !== nextToken ||
+    previousRefreshToken !== nextRefreshToken ||
+    previousExpiry !== nextExpiry
+  ) {
+    emitAuthStateChanged();
+  }
+}
+
+function clearSession() {
+  refreshInFlight = null;
+  setSession(null);
+}
+
+function expiresAtFromSeconds(expiresIn?: number): number | null {
+  if (typeof expiresIn !== "number" || !Number.isFinite(expiresIn) || expiresIn <= 0) return null;
+  return Date.now() + expiresIn * 1000;
+}
+
+function isSessionUsable(currentSession: AuthSession | null): currentSession is AuthSession {
+  if (!currentSession) return false;
+  if (currentSession.expiresAt === null) return true;
+  return currentSession.expiresAt - ACCESS_TOKEN_BUFFER_MS > Date.now();
+}
+
+function applyTokenResponse(data: TokenResponse) {
+  const previousSession = session;
+  setSession({
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token ?? previousSession?.refreshToken ?? null,
+    expiresAt: expiresAtFromSeconds(data.expires_in),
+  });
+}
+
+async function requestToken(body: URLSearchParams): Promise<TokenResponse> {
+  const response = await net.fetch(`https://${AUTH0_DOMAIN}/oauth/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Token exchange failed: ${response.status} ${text}`);
+  }
+
+  return (await response.json()) as TokenResponse;
+}
+
+export function onAuthStateChanged(listener: () => void) {
+  authStateListeners.add(listener);
+  return () => {
+    authStateListeners.delete(listener);
+  };
+}
+
+export async function getValidAccessToken(options?: { forceRefresh?: boolean }): Promise<string | null> {
+  if (!options?.forceRefresh && isSessionUsable(session)) {
+    return session.accessToken;
+  }
+
+  if (!session?.refreshToken) {
+    if (session && !isSessionUsable(session)) {
+      clearSession();
+    }
+    return null;
+  }
+
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      const currentSession = session;
+      if (!currentSession?.refreshToken) return null;
+      const refreshToken = currentSession.refreshToken;
+
+      try {
+        const data = await requestToken(new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: AUTH0_CLIENT_ID,
+          refresh_token: refreshToken,
+        }));
+        if (session?.refreshToken !== refreshToken) {
+          return session?.accessToken ?? null;
+        }
+        applyTokenResponse(data);
+        return session?.accessToken ?? null;
+      } catch (err) {
+        console.error("Token refresh failed:", err);
+        if (session?.refreshToken === refreshToken) {
+          clearSession();
+        }
+        return null;
+      } finally {
+        refreshInFlight = null;
+      }
+    })();
+  }
+
+  return refreshInFlight;
 }
 
 function waitForAuthCode(): Promise<string> {
@@ -74,7 +205,7 @@ export async function login() {
     response_type: "code",
     client_id: AUTH0_CLIENT_ID,
     redirect_uri: REDIRECT_URI,
-    scope: "openid profile email",
+    scope: "openid profile email offline_access",
     audience: import.meta.env.VITE_AUTH0_AUDIENCE ?? "",
     code_challenge: codeChallenge,
     code_challenge_method: "S256",
@@ -91,6 +222,8 @@ export async function login() {
     return true;
   } catch (err) {
     console.error("Login failed:", err);
+    codeVerifier = null;
+    clearSession();
     return false;
   }
 }
@@ -104,23 +237,13 @@ async function exchangeCode(code: string): Promise<void> {
     code_verifier: codeVerifier!,
   });
 
-  const response = await net.fetch(`https://${AUTH0_DOMAIN}/oauth/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Token exchange failed: ${response.status} ${text}`);
-  }
-
-  const data = (await response.json()) as { access_token: string };
-  accessToken = data.access_token;
+  const data = await requestToken(body);
+  applyTokenResponse(data);
   codeVerifier = null;
 }
 
 async function syncUser(): Promise<void> {
+  const accessToken = await getValidAccessToken();
   if (!accessToken) return;
 
   try {
@@ -136,7 +259,8 @@ async function syncUser(): Promise<void> {
 }
 
 export async function logout() {
-  accessToken = null;
+  clearSession();
+  codeVerifier = null;
 
   // Clear Auth0 session silently without opening a browser.
   try {

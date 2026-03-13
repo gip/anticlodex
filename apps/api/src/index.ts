@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
-import { close } from "./db.js";
+import { close, registerPoolErrorHandler } from "./db.js";
 import {
   createRedisAnonymousResponseCache,
   registerAnonymousResponseCache,
@@ -19,6 +19,8 @@ const isClaudeAgentEnabled = process.env.ACX_ENABLE_CLAUDE_AGENT === "1";
 const apiPollMsRaw = Number(process.env.ACX_AGENT_RUNNER_POLL_MS ?? "1000");
 const apiPollMs = Number.isFinite(apiPollMsRaw) && apiPollMsRaw > 0 ? apiPollMsRaw : 1000;
 const anonymousCache = await createRedisAnonymousResponseCache(app.log);
+
+registerPoolErrorHandler(app.log);
 
 registerAnonymousResponseCache(app, anonymousCache);
 

@@ -61,6 +61,22 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+a {
+  color: var(--fg);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-thickness: 1px;
+}
+
+.md-body a,
+.thread-chat-message-body a {
+  font-style: italic;
+}
+
+a:hover {
+  color: var(--fg-muted);
+}
+
 #root {
   height: 100%;
   display: flex;
@@ -2438,7 +2454,9 @@ a.project-card {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin-top: 16px;
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
 }
 
 .thread-chat-run-actions {
@@ -2478,12 +2496,14 @@ a.project-card {
 }
 
 .thread-chat-run-summary--success {
-  border-color: #1f9d55;
+  border-color: var(--fg-muted);
+  color: var(--fg);
   background: transparent;
 }
 
 .thread-chat-run-summary--failed {
-  border-color: #d64545;
+  border-color: var(--fg);
+  color: var(--fg);
   background: transparent;
 }
 
@@ -2526,23 +2546,25 @@ a.project-card {
   gap: 6px;
   font-size: 13px;
   font-weight: 600;
-  color: #1f9d55;
+  color: var(--fg);
 }
 
 .thread-chat-input {
   resize: vertical;
-  min-height: 92px;
+  min-height: 96px;
   width: 100%;
   box-sizing: border-box;
   border-radius: 12px;
+  padding: 12px 52px 12px 14px;
+  line-height: 1.5;
 }
 
 .thread-chat-send {
   position: absolute;
   bottom: 10px;
   right: 10px;
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
   border: none;
   background: var(--accent);
@@ -2584,13 +2606,14 @@ a.project-card {
 .thread-chat-history {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 18px;
 }
 
 .thread-chat-message {
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 14px;
+  padding: 14px 16px;
+  background: transparent;
 }
 
 .thread-chat-message header {
@@ -2598,7 +2621,9 @@ a.project-card {
   align-items: baseline;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
 }
 
 .thread-chat-message-header-left {
@@ -2619,10 +2644,13 @@ a.project-card {
 
 .thread-chat-message header strong {
   font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: -0.01em;
 }
 
 .thread-chat-message header span {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--fg-muted);
 }
 
@@ -2645,7 +2673,8 @@ a.project-card {
 
 .thread-chat-message-body {
   font-size: 14px;
-  line-height: 1.5;
+  line-height: 1.6;
+  color: var(--fg);
 }
 
 .thread-chat-message-body p {
@@ -2663,8 +2692,9 @@ a.project-card {
 }
 
 .thread-chat-message-body pre {
-  background: rgba(128, 128, 128, 0.1);
-  border-radius: 6px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
   padding: 10px 12px;
   overflow-x: auto;
   margin: 0 0 8px;
@@ -2673,13 +2703,15 @@ a.project-card {
 
 .thread-chat-message-body code {
   font-size: 13px;
-  background: rgba(128, 128, 128, 0.12);
-  border-radius: 3px;
-  padding: 1px 4px;
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
 }
 
 .thread-chat-message-body pre code {
   background: none;
+  border: none;
   padding: 0;
 }
 
@@ -2699,22 +2731,27 @@ a.project-card {
 }
 
 .thread-chat-message--assistant {
-  background: rgba(128, 128, 128, 0.08);
+  background: transparent;
+  border-color: var(--border);
 }
 
 .thread-chat-message--assistant-failed {
-  border-color: #d64545;
+  border-color: var(--fg);
+  border-width: 1px;
+  box-shadow: inset 0 0 0 1px var(--fg);
 }
 
 .thread-chat-message--user {
-  border-color: rgba(31, 109, 255, 0.4);
-  max-width: 80%;
+  background: var(--surface-soft);
+  border-color: var(--border);
+  max-width: 82%;
   margin-left: auto;
 }
 
 .thread-chat-message--system {
   border-style: dashed;
-  max-width: 80%;
+  background: transparent;
+  max-width: 82%;
   margin-left: auto;
 }
 

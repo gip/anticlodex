@@ -450,9 +450,11 @@ interface V1RunStartBody {
 
 const CODEX_MODEL = "gpt-5.3-codex";
 const LEGACY_CODEX_MODEL = "codex-5.3";
+const CLAUDE_OPUS_4_7_MODEL = "claude-opus-4-7";
+const GPT_5_5_MODEL = "gpt-5.5";
 const GPT_5_4_MODEL = "gpt-5.4";
-const ALLOWED_ASSISTANT_MODELS = ["claude-opus-4-6", "claude-sonnet-4-6", CODEX_MODEL, LEGACY_CODEX_MODEL, GPT_5_4_MODEL] as const;
-const DEFAULT_ASSISTANT_MODEL: "claude-opus-4-6" | "claude-sonnet-4-6" | "codex-5.3" | "gpt-5.3-codex" | "gpt-5.4" = "claude-opus-4-6";
+const ALLOWED_ASSISTANT_MODELS = ["claude-opus-4-6", CLAUDE_OPUS_4_7_MODEL, "claude-sonnet-4-6", CODEX_MODEL, LEGACY_CODEX_MODEL, GPT_5_5_MODEL, GPT_5_4_MODEL] as const;
+const DEFAULT_ASSISTANT_MODEL: "claude-opus-4-6" | "claude-opus-4-7" | "claude-sonnet-4-6" | "codex-5.3" | "gpt-5.3-codex" | "gpt-5.5" | "gpt-5.4" = "claude-opus-4-6";
 const SYSTEM_PROMPT_CONCERN = "__system_prompt__";
 const DEFAULT_SYSTEM_PROMPT =
   "You are a staff software engineer with top design and implementation skills. " +
@@ -481,7 +483,9 @@ function formatAssistantModelLabel(rawModel: string): string {
   const model = rawModel.trim();
   if (model === "gpt-5.3-codex") return "Codex 5.3";
   if (model === "codex-5.3") return "Codex 5.3";
+  if (model === "gpt-5.5") return "GPT 5.5";
   if (model === "gpt-5.4") return "GPT 5.4";
+  if (model === "claude-opus-4-7") return "Claude Opus 4.7";
   if (model === "claude-opus-4-6") return "Claude Opus 4.6";
   if (model === "claude-sonnet-4-6") return "Claude Sonnet 4.6";
   return model;
@@ -2898,7 +2902,7 @@ export async function v1Routes(app: FastifyInstance) {
             reply,
             400,
             "Invalid model",
-            "model must be one of claude-opus-4-6, claude-sonnet-4-6, codex-5.3, gpt-5.3-codex, or gpt-5.4",
+            "model must be one of claude-opus-4-6, claude-opus-4-7, claude-sonnet-4-6, codex-5.3, gpt-5.3-codex, gpt-5.5, or gpt-5.4",
           );
         }
         resolvedModel = normalizeAssistantModel(model);

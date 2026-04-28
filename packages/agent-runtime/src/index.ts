@@ -9,10 +9,12 @@ type AgentRunStatus = "success" | "failed";
 
 const DEFAULT_TOOLS = ["Read", "Grep", "Glob", "Bash", "Edit", "Write"] as const;
 const DEFAULT_MODEL = "claude-opus-4-6";
+const CLAUDE_OPUS_4_7_MODEL = "claude-opus-4-7";
 const CODEX_MODEL = "gpt-5.3-codex";
 const LEGACY_CODEX_MODEL = "codex-5.3";
+const GPT_5_5_MODEL = "gpt-5.5";
 const GPT_5_4_MODEL = "gpt-5.4";
-const ALLOWED_ASSISTANT_MODELS = ["claude-opus-4-6", "claude-sonnet-4-6", CODEX_MODEL, LEGACY_CODEX_MODEL, GPT_5_4_MODEL] as const;
+const ALLOWED_ASSISTANT_MODELS = ["claude-opus-4-6", CLAUDE_OPUS_4_7_MODEL, "claude-sonnet-4-6", CODEX_MODEL, LEGACY_CODEX_MODEL, GPT_5_5_MODEL, GPT_5_4_MODEL] as const;
 type AssistantModel = (typeof ALLOWED_ASSISTANT_MODELS)[number];
 export type AgentProvider = "claude" | "codex" | "unknown";
 
@@ -59,8 +61,10 @@ export interface ResolveThreadWorkspacePathInput {
 }
 
 function normalizeAssistantModel(rawModel: string | undefined): AssistantModel {
+  if (rawModel === CLAUDE_OPUS_4_7_MODEL) return CLAUDE_OPUS_4_7_MODEL;
   if (rawModel === "claude-sonnet-4-6") return "claude-sonnet-4-6";
   if (rawModel === CODEX_MODEL || rawModel === LEGACY_CODEX_MODEL) return CODEX_MODEL;
+  if (rawModel === GPT_5_5_MODEL) return GPT_5_5_MODEL;
   if (rawModel === GPT_5_4_MODEL) return GPT_5_4_MODEL;
   return DEFAULT_MODEL;
 }
@@ -153,7 +157,7 @@ export interface RunAgentInput extends BaseRunAgentInput {
 
 export async function runAgent(input: RunAgentInput): Promise<AgentRunResult> {
   const model = normalizeAssistantModel(input.model);
-  if (model === CODEX_MODEL || model === GPT_5_4_MODEL) {
+  if (model === CODEX_MODEL || model === GPT_5_5_MODEL || model === GPT_5_4_MODEL) {
     return runCodexAgent({
       ...input,
       model,

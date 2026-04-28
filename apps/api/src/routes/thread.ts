@@ -616,8 +616,10 @@ interface ParsedDocumentText {
 
 const CODEX_MODEL = "gpt-5.3-codex";
 const LEGACY_CODEX_MODEL = "codex-5.3";
+const CLAUDE_OPUS_4_7_MODEL = "claude-opus-4-7";
+const GPT_5_5_MODEL = "gpt-5.5";
 const GPT_5_4_MODEL = "gpt-5.4";
-const ALLOWED_ASSISTANT_MODELS = ["claude-opus-4-6", "claude-sonnet-4-6", CODEX_MODEL, LEGACY_CODEX_MODEL, GPT_5_4_MODEL] as const;
+const ALLOWED_ASSISTANT_MODELS = ["claude-opus-4-6", CLAUDE_OPUS_4_7_MODEL, "claude-sonnet-4-6", CODEX_MODEL, LEGACY_CODEX_MODEL, GPT_5_5_MODEL, GPT_5_4_MODEL] as const;
 type AssistantModel = (typeof ALLOWED_ASSISTANT_MODELS)[number];
 const DEFAULT_ASSISTANT_MODEL: AssistantModel = "claude-opus-4-6";
 

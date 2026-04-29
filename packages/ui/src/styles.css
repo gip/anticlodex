@@ -1,3 +1,62 @@
+/* Zed Sans / Zed Mono — © Zed Industries, SIL OFL 1.1
+   Source: https://github.com/zed-industries/zed-fonts (v1.2.0) */
+@font-face {
+  font-family: "Zed Sans";
+  src: url("./fonts/zed-sans-regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zed Sans";
+  src: url("./fonts/zed-sans-medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zed Sans";
+  src: url("./fonts/zed-sans-semibold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zed Sans";
+  src: url("./fonts/zed-sans-bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zed Mono";
+  src: url("./fonts/zed-mono-regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zed Mono";
+  src: url("./fonts/zed-mono-medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zed Mono";
+  src: url("./fonts/zed-mono-bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zed Mono";
+  src: url("./fonts/zed-mono-italic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+
 *,
 *::before,
 *::after {
@@ -8,14 +67,16 @@
 
 :root,
 [data-theme="light"] {
-  --bg: #fafafa;
-  --bg-secondary: #ffffff;
-  --surface-soft: #f3f3f3;
+  --bg: #f5f5f4;
+  --bg-secondary: #fbfbfa;
+  --surface-soft: #efefee;
   --surface-raised: #ffffff;
-  --fg: #171717;
-  --fg-muted: #666666;
-  --border: #a0a0a0;
-  --accent: #000000;
+  --fg: #1a1a1a;
+  --fg-muted: #6b6b6b;
+  --fg-subtle: #9a9a9a;
+  --border: #d8d8d6;
+  --border-strong: #c4c4c2;
+  --accent: #1a1a1a;
   --accent-fg: #ffffff;
   --shadow-soft: 0 18px 42px rgba(23, 23, 23, 0.08);
   --home-glow-primary: rgba(255, 127, 53, 0.34);
@@ -26,20 +87,27 @@
   --home-panel-bg: rgba(255, 255, 255, 0.86);
   --home-panel-bg-alt: rgba(255, 255, 255, 0.68);
   --focus-ring: rgba(23, 23, 23, 0.25);
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --sidebar-bg: #f0f0f0;
+  --font: "Zed Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Zed Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sidebar-bg: #efefee;
+  --window-bg: #e8e8e6;
+  --panel-bg: #fbfbfa;
+  --panel-bg-active: #ececea;
+  --titlebar-bg: #e8e8e6;
 }
 
 [data-theme="dark"] {
-  --bg: #0a0a0a;
-  --bg-secondary: #111111;
-  --surface-soft: #1a1a1a;
-  --surface-raised: #131313;
-  --fg: #ededed;
+  --bg: #0d0d0d;
+  --bg-secondary: #131313;
+  --surface-soft: #1c1c1c;
+  --surface-raised: #181818;
+  --fg: #e6e6e6;
   --fg-muted: #888888;
-  --border: #333333;
-  --accent: #ffffff;
-  --accent-fg: #000000;
+  --fg-subtle: #555555;
+  --border: #262626;
+  --border-strong: #383838;
+  --accent: #e6e6e6;
+  --accent-fg: #0d0d0d;
   --shadow-soft: 0 18px 42px rgba(0, 0, 0, 0.45);
   --home-glow-primary: rgba(255, 173, 117, 0.28);
   --home-glow-secondary: rgba(119, 177, 255, 0.26);
@@ -49,7 +117,11 @@
   --home-panel-bg: rgba(12, 12, 12, 0.84);
   --home-panel-bg-alt: rgba(12, 12, 12, 0.68);
   --focus-ring: rgba(237, 237, 237, 0.35);
-  --sidebar-bg: #141414;
+  --sidebar-bg: #131313;
+  --window-bg: #0a0a0a;
+  --panel-bg: #161616;
+  --panel-bg-active: #232323;
+  --titlebar-bg: #0a0a0a;
 }
 
 html,
@@ -91,10 +163,10 @@ a:hover {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 48px;
-  padding: 0 24px;
+  height: 40px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--border);
-  background: var(--bg-secondary);
+  background: var(--titlebar-bg);
 }
 
 .header-left {
@@ -107,9 +179,9 @@ a.header-logo {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
   text-decoration: none;
   color: var(--fg);
 }
@@ -117,9 +189,9 @@ a.header-logo {
 .header--desktop {
   -webkit-app-region: drag;
   position: sticky;
-  height: 42px;
-  background: var(--bg);
-  border-bottom: none;
+  height: 36px;
+  background: var(--titlebar-bg);
+  border-bottom: 1px solid var(--border);
 }
 
 .header--desktop .header-left {
@@ -127,7 +199,7 @@ a.header-logo {
   grid-template-columns: auto 1fr;
   flex: 1;
   justify-content: flex-start;
-  padding-left: 48px;
+  padding-left: 72px;
   gap: 8px;
 }
 
@@ -146,9 +218,9 @@ a.header-logo {
 a.header-project-label {
   flex: 0 0 auto;
   text-align: center;
-  font-size: 14px;
-  font-weight: 500;
-  letter-spacing: -0.01em;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
   text-decoration: none;
   color: var(--fg-muted);
   max-width: 100%;
@@ -184,15 +256,22 @@ a.header-project-label:hover {
 }
 
 .btn {
-  padding: 8px 16px;
-  font-size: 14px;
+  padding: 6px 14px;
+  font-size: 13px;
   font-weight: 500;
+  font-family: var(--font);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 5px;
   background: var(--accent);
   color: var(--accent-fg);
   cursor: pointer;
   transition: opacity 0.15s;
+}
+
+.header .btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .btn:hover {
@@ -203,19 +282,20 @@ a.header-project-label:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
-  font-size: 18px;
+  width: 28px;
+  height: 28px;
+  font-size: 14px;
   border: none;
-  border-radius: 6px;
+  border-radius: 4px;
   background: transparent;
-  color: var(--fg);
+  color: var(--fg-muted);
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background 0.15s, color 0.15s;
 }
 
 .btn-icon:hover {
-  background: var(--border);
+  background: var(--panel-bg-active);
+  color: var(--fg);
 }
 .btn-icon.btn-icon-theme {
   border: none;
@@ -966,8 +1046,8 @@ select.field-input {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
   border: none;
   padding: 0;
@@ -983,7 +1063,7 @@ select.field-input {
 }
 
 .avatar-fallback {
-  font-size: 14px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--fg);
 }
@@ -3294,6 +3374,7 @@ a.project-card {
   flex: 1;
   display: flex;
   min-height: 0;
+  background: var(--window-bg);
 }
 
 .app-content {
@@ -3302,12 +3383,13 @@ a.project-card {
   flex-direction: column;
   min-width: 0;
   overflow-y: auto;
+  background: var(--panel-bg);
 }
 
 /* Sidebar */
 
 .sidebar {
-  width: 260px;
+  width: 240px;
   flex-shrink: 0;
   background: var(--sidebar-bg);
   border-right: 1px solid var(--border);
@@ -3316,11 +3398,11 @@ a.project-card {
 }
 
 .sidebar-nav {
-  padding: 12px 0;
+  padding: 6px 0;
 }
 
 .sidebar-project {
-  margin-bottom: 2px;
+  margin-bottom: 1px;
 }
 
 .sidebar-project-header {
@@ -3328,8 +3410,8 @@ a.project-card {
   align-items: center;
   gap: 4px;
   width: 100%;
-  padding: 6px 12px;
-  font-size: 13px;
+  padding: 4px 10px 4px 8px;
+  font-size: 12px;
   font-weight: 500;
   font-family: var(--font);
   color: var(--fg);
@@ -3337,11 +3419,11 @@ a.project-card {
   border: none;
   cursor: pointer;
   text-align: left;
-  transition: background 0.15s;
+  transition: background 0.1s;
 }
 
 .sidebar-project-header:hover {
-  background: rgba(128, 128, 128, 0.1);
+  background: var(--panel-bg-active);
 }
 
 .sidebar-project-link {
@@ -3359,16 +3441,17 @@ a.project-card {
 }
 
 .sidebar-project-count {
-  font-size: 11px;
-  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-subtle);
   flex-shrink: 0;
   margin-left: auto;
 }
 
 .sidebar-chevron {
   flex-shrink: 0;
-  color: var(--fg-muted);
-  transition: transform 0.15s;
+  color: var(--fg-subtle);
+  transition: transform 0.1s;
 }
 
 .sidebar-chevron--open {
@@ -3384,27 +3467,28 @@ a.project-card {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 12px 4px 30px;
-  font-size: 13px;
+  padding: 3px 10px 3px 26px;
+  font-size: 12px;
   text-decoration: none;
   color: var(--fg-muted);
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.1s, color 0.1s;
 }
 
 a.sidebar-thread:hover {
-  background: rgba(128, 128, 128, 0.1);
+  background: var(--panel-bg-active);
   color: var(--fg);
 }
 
 .sidebar-thread--empty {
-  font-size: 12px;
-  color: var(--fg-muted);
-  opacity: 0.6;
+  font-size: 11px;
+  color: var(--fg-subtle);
+  font-style: italic;
 }
 
 .sidebar-thread-id {
-  font-size: 12px;
-  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-subtle);
   flex-shrink: 0;
 }
 

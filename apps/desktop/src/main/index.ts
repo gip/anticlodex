@@ -45,7 +45,7 @@ function createWindow() {
     height: 768,
     icon: appIcon ?? undefined,
     titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 16, y: 14 },
+    trafficLightPosition: { x: 12, y: 11 },
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
       contextIsolation: true,

@@ -15,6 +15,7 @@ import {
   useAuth,
   Header,
   Sidebar,
+  StatusBar,
   Home,
   ProjectPage,
   ProjectSettingsPage,
@@ -2190,11 +2191,16 @@ function AppShell({
             <Route path="/:handle/:project/thread/:threadId" element={<ThreadRoute onProjectMutated={refreshProjects} />} />
             <Route path="*" element={<NotFoundRoute />} />
           </Routes>
-          <footer className="site-footer">
-            Built by <a href="https://x.com/wutheringsf" target="_blank" rel="noreferrer">@wutheringsf</a>
-          </footer>
         </div>
       </div>
+      <StatusBar
+        onToggleSidebar={isAuthenticated ? toggleSidebar : undefined}
+        contextLabel={
+          activeProjectOwner && activeProjectName
+            ? `${activeProjectOwner} / ${activeProjectName}`
+            : undefined
+        }
+      />
     </>
   );
 }

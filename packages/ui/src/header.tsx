@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from "react";
-import { Moon, Sun, PanelLeft } from "lucide-react";
+import { PanelLeft } from "lucide-react";
 import { useAuth } from "./auth-context";
-import { useTheme } from "./theme";
 import { Link } from "./link";
 import { Logo } from "./logo";
 
@@ -17,7 +16,6 @@ export function Header({
   onToggleSidebar?: () => void;
 }) {
   const { isAuthenticated, isLoading, user, login, logout } = useAuth();
-  const { theme, toggle } = useTheme();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -70,9 +68,6 @@ export function Header({
         </div>
       )}
       <div className="header-right">
-        <button className="btn-icon btn-icon-theme header-no-drag" onClick={toggle} aria-label="Toggle theme">
-          {theme === "light" ? <Moon size={16} /> : <Sun size={16} />}
-        </button>
         {isLoading ? null : !isAuthenticated ? (
           <button className="btn header-no-drag" onClick={login}>Log In</button>
         ) : (

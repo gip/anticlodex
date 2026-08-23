@@ -1,5 +1,6 @@
 export { AuthContext, useAuth, type AuthContextValue, type AuthUser } from "./auth-context";
 export { ThemeProvider, useTheme } from "./theme";
+export { SchemeProvider, useScheme, SCHEMES, type Scheme } from "./scheme";
 export { Header } from "./header";
 export { Home, type Project, type Thread } from "./home";
 export { ProjectPage } from "./project-page";
@@ -26,5 +27,6 @@ export {
 export { UserProfilePage, type UserProfile, type UserProfileProject } from "./user-profile";
 export { ProjectSettingsPage, type Collaborator, type SearchResult, type Concern } from "./project-settings";
 export { Sidebar } from "./sidebar";
+export { StatusBar } from "./status-bar";
 export { Link, setNavigate } from "./link";
 export { Logo } from "./logo";

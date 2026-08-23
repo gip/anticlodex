@@ -10,7 +10,7 @@ import {
   normalizeOpenShipOrigin,
   validateDiscovery,
   validateSources,
-} from "@openshipdev/protocol";
+} from "@openship/protocol";
 
 import pool, { query } from "../db.js";
 import { generateOpenShipFileBundle } from "../agent-runner.js";

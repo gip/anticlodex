@@ -28,10 +28,10 @@
     "name": "Example system",
     "rootNodeId": "s.root",
     "nodes": [
-      { "id": "s.root", "kind": "Root", "name": "Example" },
-      { "id": "h.runtime", "kind": "Host", "name": "Application runtime", "parentId": "s.root" },
-      { "id": "p.web", "kind": "Process", "name": "Web process", "parentId": "h.runtime", "sourceSelectors": ["app/**"] },
-      { "id": "l.config", "kind": "Library", "name": "Project configuration", "sourceSelectors": ["package.json"] }
+      { "id": "s.root", "kind": "Root", "name": "Example", "metadata": { "ownership": "first_party" } },
+      { "id": "h.runtime", "kind": "Host", "name": "Application runtime", "parentId": "s.root", "metadata": { "ownership": "first_party" } },
+      { "id": "p.web", "kind": "Process", "name": "Web process", "parentId": "h.runtime", "sourceSelectors": ["app/**"], "metadata": { "ownership": "first_party" } },
+      { "id": "l.config", "kind": "Library", "name": "Project configuration", "sourceSelectors": ["package.json"], "metadata": { "ownership": "third_party" } }
     ],
     "edges": [
       { "id": "e.web.config", "type": "Dependency", "fromNodeId": "p.web", "toNodeId": "l.config" }
@@ -53,4 +53,3 @@
     }
   }
 }
-

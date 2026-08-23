@@ -55,6 +55,8 @@ Canonical node shape:
 
 Rules:
 
+- Every node has `metadata.ownership`, whose value is `first_party` or `third_party`.
+- `first_party` means the system publisher owns or controls the component's implementation or operation. `third_party` means an external provider owns or controls it.
 - Exactly one node has kind `Root`; its ID equals `rootNodeId` and it has no parent.
 - Every Host has the Root as parent.
 - Every Container has a Host parent.
@@ -62,7 +64,7 @@ Rules:
 - Library has no parent. Process and Library cannot contain children.
 - IDs are unique and match `^[A-Za-z0-9._:-]+$`.
 - The containment graph is acyclic.
-- Metadata is optional and open-ended. Ownership, boundary, ID prefixes, and host naming are not required by v1.
+- Metadata is open-ended beyond the required, typed `ownership` member. Boundary, ID prefixes, host naming, and other metadata are not required by v1.
 
 ### Source selectors
 
@@ -161,4 +163,3 @@ A consumer SHOULD validate in this order:
 6. Matrix, prompt, artifact, and supersession references.
 
 Unknown metadata keys MUST be preserved. Unknown node, edge, document, or artifact kinds are invalid in v1.
-

@@ -34,16 +34,24 @@
   "$defs": {
     "id": { "type": "string", "pattern": "^[A-Za-z0-9._:-]+$" },
     "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "ownership": { "enum": ["first_party", "third_party"] },
     "node": {
       "type": "object",
-      "required": ["id", "kind", "name"],
+      "required": ["id", "kind", "name", "metadata"],
       "properties": {
         "id": { "$ref": "#/$defs/id" },
         "kind": { "enum": ["Root", "Host", "Container", "Process", "Library"] },
         "name": { "type": "string", "minLength": 1 },
         "parentId": { "$ref": "#/$defs/id" },
         "sourceSelectors": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
-        "metadata": { "type": "object", "additionalProperties": true }
+        "metadata": {
+          "type": "object",
+          "required": ["ownership"],
+          "properties": {
+            "ownership": { "$ref": "#/$defs/ownership" }
+          },
+          "additionalProperties": true
+        }
       },
       "additionalProperties": true
     },

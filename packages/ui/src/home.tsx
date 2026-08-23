@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { Plus } from "lucide-react";
 import { useAuth } from "./auth-context";
 import { Link } from "./link";
-import { fetchOpenShip, type DiscoveryDocument, type SourcesBundle, type SourcesManifest, type SystemsDocument } from "@openshipdev/protocol";
+import { fetchOpenShip, type DiscoveryDocument, type SourcesBundle, type SourcesManifest, type SystemsDocument } from "@openship/protocol";
 
 export type ThreadStatus = "open" | "closed" | "committed";
 export type ProjectVisibility = "public" | "private";

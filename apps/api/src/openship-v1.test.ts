@@ -3,7 +3,7 @@ import test from "node:test";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { validateSources } from "@openshipdev/protocol";
+import { validateSources } from "@openship/protocol";
 import type { PoolClient } from "pg";
 import { emptySources, exportSystems, populateOpenShipSystem, verifyImportSnapshot } from "./openship-v1.js";
 

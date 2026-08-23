@@ -8,9 +8,9 @@ importers:
 
   .:
     devDependencies:
-      '@openshipdev/protocol':
-        specifier: file:../openship/packages/protocol
-        version: file:../openship/packages/protocol
+      '@openship/protocol':
+        specifier: 0.0.1
+        version: 0.0.1
       '@types/node':
         specifier: ^22.13.1
         version: 22.19.11
@@ -26,9 +26,9 @@ importers:
       '@fastify/cors':
         specifier: ^11.0.0
         version: 11.2.0
-      '@openshipdev/protocol':
-        specifier: file:../../../openship/packages/protocol
-        version: file:../openship/packages/protocol
+      '@openship/protocol':
+        specifier: 0.0.1
+        version: 0.0.1
       fastify:
         specifier: ^5.2.1
         version: 5.7.4
@@ -141,9 +141,9 @@ importers:
 
   packages/ui:
     dependencies:
-      '@openshipdev/protocol':
-        specifier: file:../../../openship/packages/protocol
-        version: file:../openship/packages/protocol
+      '@openship/protocol':
+        specifier: 0.0.1
+        version: 0.0.1
       elkjs:
         specifier: ^0.9.3
         version: 0.9.3
@@ -768,8 +768,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@openshipdev/protocol@file:../openship/packages/protocol':
-    resolution: {directory: ../openship/packages/protocol, type: directory}
+  '@openship/protocol@0.0.1':
+    resolution: {integrity: sha512-qg8S5BG6WTG75dEHHqBp6NJIHzAU+WL2+9PZDdTYStPXPXMPhfadlpvAe5PelRraXRRqoxLMmamUkrqFOPgSZA==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -2509,7 +2509,7 @@ snapshots:
   '@openai/codex@0.104.0-win32-x64':
     optional: true
 
-  '@openshipdev/protocol@file:../openship/packages/protocol':
+  '@openship/protocol@0.0.1':
     dependencies:
       '@noble/hashes': 2.3.0
 

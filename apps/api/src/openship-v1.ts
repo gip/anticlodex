@@ -9,7 +9,7 @@ import {
   type SourcesManifest,
   type SystemsDocument,
   type VerifiedSources,
-} from "@openshipdev/protocol";
+} from "@openship/protocol";
 import pool from "./db.js";
 
 export const OPENSHIP_V1 = "1.0";

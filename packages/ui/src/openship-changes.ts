@@ -7,7 +7,7 @@ import {
   type DiscoveryDocument,
   type SourcesBundle,
   type SourcesManifest,
-} from "@openshipdev/protocol";
+} from "@openship/protocol";
 
 export type OpenShipApiFetch = (path: string, init?: RequestInit) => Promise<Response>;
 

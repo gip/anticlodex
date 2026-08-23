@@ -28,7 +28,7 @@ import {
   type SourcesManifest,
   type SystemsDocument,
   type VerifiedSources,
-} from "@openshipdev/protocol";
+} from "@openship/protocol";
 import { applyOpenShipV1DocumentToThread, exportSystems } from "./openship-v1.js";
 import pool from "./db.js";
 

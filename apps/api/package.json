@@ -13,7 +13,7 @@
     "migrate:down:last": "node-pg-migrate down 1 --config node-pg-migrate.config.cjs --migrations-dir db/migrations"
   },
   "dependencies": {
-    "@openshipdev/protocol": "file:../../../openship/packages/protocol",
+    "@openship/protocol": "0.0.1",
     "@fastify/cors": "^11.0.0",
     "@acx/agent-runtime": "workspace:*",
     "fastify": "^5.2.1",

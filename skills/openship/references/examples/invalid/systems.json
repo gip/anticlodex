@@ -22,10 +22,10 @@
     "name": "Broken",
     "rootNodeId": "s.root",
     "nodes": [
-      { "id": "s.root", "kind": "Root", "name": "Broken" },
-      { "id": "h.runtime", "kind": "Host", "name": "Runtime", "parentId": "s.root" },
-      { "id": "p.web", "kind": "Process", "name": "Web", "parentId": "h.runtime" },
-      { "id": "l.config", "kind": "Library", "name": "Config" }
+      { "id": "s.root", "kind": "Root", "name": "Broken", "metadata": { "ownership": "first_party" } },
+      { "id": "h.runtime", "kind": "Host", "name": "Runtime", "parentId": "s.root", "metadata": { "ownership": "first_party" } },
+      { "id": "p.web", "kind": "Process", "name": "Web", "parentId": "h.runtime", "metadata": { "ownership": "first_party" } },
+      { "id": "l.config", "kind": "Library", "name": "Config", "metadata": { "ownership": "third_party" } }
     ],
     "edges": [
       { "id": "e.invalid", "type": "Runtime", "fromNodeId": "p.web", "toNodeId": "l.config" }

@@ -1,7 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { Auth0Provider } from "@auth0/auth0-react";
-import { ThemeProvider } from "@acx/ui";
+import { ThemeProvider, SchemeProvider } from "@acx/ui";
 import "@acx/ui/styles.css";
 import { App } from "./app";
 
@@ -21,9 +21,11 @@ createRoot(document.getElementById("root")!).render(
         scope: "openid profile email offline_access",
       }}
     >
-      <ThemeProvider>
-        <App />
-      </ThemeProvider>
+      <SchemeProvider>
+        <ThemeProvider>
+          <App />
+        </ThemeProvider>
+      </SchemeProvider>
     </Auth0Provider>
   </StrictMode>,
 );

@@ -5,6 +5,7 @@ import {
   useAuth,
   Header,
   Sidebar,
+  StatusBar,
   Home,
   ProjectPage,
   ProjectSettingsPage,
@@ -2247,6 +2248,11 @@ function AppShell({
           </Routes>
         </div>
       </div>
+      <StatusBar
+        variant="desktop"
+        onToggleSidebar={isAuthenticated ? toggleSidebar : undefined}
+        contextLabel={handle && projectName ? `${handle} / ${projectName}` : undefined}
+      />
     </>
   );
 }

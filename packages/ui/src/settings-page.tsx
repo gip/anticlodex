@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { Link } from "./link";
+import { useScheme, SCHEMES } from "./scheme";
 import type { IntegrationConnectionStatus, IntegrationProvider, IntegrationStatusRecord } from "./thread-page";
 
 type MutationError = { error: string };
@@ -73,6 +74,7 @@ export function SettingsPage({
 }: SettingsPageProps) {
   const [activeProvider, setActiveProvider] = useState<IntegrationProvider | null>(null);
   const [integrationError, setIntegrationError] = useState("");
+  const { scheme, setScheme } = useScheme();
 
   const handleConnect = async (provider: IntegrationProvider) => {
     setIntegrationError("");
@@ -97,13 +99,36 @@ export function SettingsPage({
   };
 
   return (
-    <div className="page">
+    <div className="page settings-page">
       <div className="page-header">
         <Link to="/" className="page-back">
           <ArrowLeft size={20} />
         </Link>
         <h1 className="page-title">Settings</h1>
       </div>
+
+      <section className="thread-section">
+        <h2 className="thread-section-title">Color scheme</h2>
+        <p className="page-description">
+          Choose how the interface looks. The layout and font stay the same — only the colors change.
+        </p>
+        <div className="scheme-picker">
+          {SCHEMES.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              className={`scheme-option${scheme === s.id ? " scheme-option--active" : ""}`}
+              onClick={() => setScheme(s.id)}
+            >
+              <span className={`scheme-swatch scheme-swatch--${s.id}`} aria-hidden />
+              <span className="scheme-option-text">
+                <span className="scheme-option-label">{s.label}</span>
+                <span className="scheme-option-description">{s.description}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+      </section>
 
       <section className="thread-section profile-integrations">
         <h2 className="thread-section-title">Document integrations</h2>

@@ -1,0 +1,12 @@
+{
+  "openship": "1.0",
+  "capability": "changes",
+  "changeId": "5d7621f4-7ad5-49f6-8168-da99620ff1cf",
+  "base": "sha256:1d322539e651a3c2d7c51eb8b33160627395b9601bff909e599771b806d9e565",
+  "digest": "sha256:b0eea548e74112b0be4dcff867f405086ef4456508089ee007ce38959a78cb08",
+  "status": "ready",
+  "phase": "deployed",
+  "candidateOrigin": "https://b0eea548e741.example-builds.net",
+  "reason": null
+}
+

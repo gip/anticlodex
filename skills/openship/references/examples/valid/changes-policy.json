@@ -1,0 +1,12 @@
+{
+  "openship": "1.0",
+  "capability": "changes",
+  "writable": ["app/**", "public/**"],
+  "protected": ["app/api/**", "skills/openship/**"],
+  "limits": { "filesPerChange": 40, "bytesPerFile": 262144, "bytesPerChange": 1048576 },
+  "contentRules": [
+    { "id": "dynamic-eval", "rule": "Dynamic evaluation", "message": "Use static imports." }
+  ],
+  "document": "https://example.com/openship/file/skills/openship/references/openship-changes.md"
+}
+

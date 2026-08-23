@@ -29,6 +29,10 @@ import {
   type Collaborator,
   type Concern,
   type SearchResult,
+  type OpenShipProjectInfo,
+  type OpenShipRemoteChange,
+  pollOpenShipChange,
+  submitOpenShipChanges,
 } from "@acx/ui";
 
 function normalizeApiUrl(raw: string): string {
@@ -717,10 +721,13 @@ function HomeRoute({
       }}
       onCreateProject={async (data) => {
         try {
-          const res = await apiFetch("/projects", {
+          const { openshipImport, ...projectInput } = data;
+          const res = await apiFetch(openshipImport ? "/projects/imports/openship" : "/projects", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(data),
+            body: JSON.stringify(openshipImport
+              ? { ...projectInput, template: undefined, ...openshipImport }
+              : projectInput),
           });
           if (!res.ok) {
             const body = await res.json().catch(() => ({}));
@@ -895,6 +902,7 @@ function ProjectRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: 
   const { handle, project: projectName } = useParams<{ handle: string; project: string }>();
   const apiFetch = useApi();
   const [project, setProject] = useState<Project | null>(null);
+  const [openship, setOpenShip] = useState<OpenShipProjectInfo | null>(null);
   const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
@@ -924,6 +932,10 @@ function ProjectRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: 
         ...normalizeProject(found),
         threads,
       });
+      const openshipRes = await apiFetch(
+        `/projects/${encodeURIComponent(handle)}/${encodeURIComponent(projectName)}/openship`,
+      );
+      if (openshipRes.ok) setOpenShip(await openshipRes.json() as OpenShipProjectInfo);
     };
 
     loadProject().catch(() => setNotFound(true));
@@ -948,6 +960,36 @@ function ProjectRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: 
   return (
     <ProjectPage
       project={project}
+      openship={openship}
+      onSubmitOpenShipChanges={openship?.discovery ? async (title, intent) => {
+        try {
+          return await submitOpenShipChanges({
+            apiFetch,
+            projectPath: `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}`,
+            discovery: openship.discovery as Parameters<typeof submitOpenShipChanges>[0]["discovery"],
+            title,
+            intent,
+          });
+        } catch (error) {
+          return { error: error instanceof Error ? error.message : "Changes submission failed" };
+        }
+      } : undefined}
+      onListOpenShipChanges={openship?.discovery ? async () => {
+        const res = await apiFetch(`/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/openship/remote-changes`);
+        if (!res.ok) return { error: await readError(res, "Failed to load candidate history") };
+        return (await res.json() as { changes: OpenShipRemoteChange[] }).changes;
+      } : undefined}
+      onPollOpenShipChange={openship?.discovery ? async (change) => {
+        try {
+          return await pollOpenShipChange({
+            apiFetch,
+            projectPath: `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}`,
+            change,
+          });
+        } catch (error) {
+          return { error: error instanceof Error ? error.message : "Changes status failed" };
+        }
+      } : undefined}
       onUpdateDescription={async (description) => {
         if (!handle || !projectName) {
           return { error: "Project not found" };

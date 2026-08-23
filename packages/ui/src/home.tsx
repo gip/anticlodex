@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { Plus } from "lucide-react";
 import { useAuth } from "./auth-context";
 import { Link } from "./link";
+import { fetchOpenShip, type DiscoveryDocument, type SourcesBundle, type SourcesManifest, type SystemsDocument } from "@openshipdev/protocol";
 
 export type ThreadStatus = "open" | "closed" | "committed";
 export type ProjectVisibility = "public" | "private";
@@ -35,9 +36,9 @@ export interface Project {
 const TEMPLATES = [
   { id: "blank", label: "Blank", description: "Empty project, start from scratch" },
   {
-    id: "acx-openship-bundle-import",
-    label: "AntiClodeX OpenShip runtime import",
-    description: "Imports the canonical OpenShip bundle from ./openship into the project",
+    id: "openship-origin",
+    label: "Import OpenShip origin",
+    description: "Retrieve and verify OpenShip 1.0 Sources or Systems from a running project",
   },
   {
     id: "webserver-postgres-auth0-google-vercel",
@@ -53,6 +54,11 @@ interface CreateModalProps {
     description: string;
     template: string;
     visibility: ProjectVisibility;
+    openshipImport?: {
+      origin: string;
+      discovery: DiscoveryDocument;
+      snapshot: { kind: "sources"; manifest: SourcesManifest; bundle: SourcesBundle } | { kind: "systems"; document: SystemsDocument };
+    };
   }) => Promise<{ error?: string } | void>;
   onCheckName?: (name: string) => Promise<boolean>;
 }
@@ -62,6 +68,9 @@ function CreateProjectModal({ onClose, onCreate, onCheckName }: CreateModalProps
   const [description, setDescription] = useState("");
   const [template, setTemplate] = useState("blank");
   const [visibility, setVisibility] = useState<ProjectVisibility | "">("");
+  const [origin, setOrigin] = useState("");
+  const [inspecting, setInspecting] = useState(false);
+  const [inspected, setInspected] = useState<Awaited<ReturnType<typeof fetchOpenShip>> | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [duplicateError, setDuplicateError] = useState("");
   const [submitError, setSubmitError] = useState("");
@@ -75,7 +84,8 @@ function CreateProjectModal({ onClose, onCreate, onCheckName }: CreateModalProps
       ? "No spaces at the beginning or end"
       : "";
   const nameError = formatError || duplicateError;
-  const canSubmit = nameTrimmed.length > 0 && nameValid && name === nameTrimmed && !submitting && !duplicateError && !!visibility;
+  const requiresImport = template === "openship-origin";
+  const canSubmit = nameTrimmed.length > 0 && nameValid && name === nameTrimmed && !submitting && !duplicateError && !!visibility && (!requiresImport || (!!inspected && description.trim().length > 0));
 
   useEffect(() => {
     setDuplicateError("");
@@ -95,10 +105,43 @@ function CreateProjectModal({ onClose, onCreate, onCheckName }: CreateModalProps
     setSubmitting(true);
     setSubmitError("");
     if (!visibility) return;
-    const result = await onCreate({ name: name.trim(), description: description.trim(), template, visibility });
+    const result = await onCreate({
+      name: name.trim(),
+      description: description.trim(),
+      template,
+      visibility,
+      ...(inspected ? { openshipImport: { origin: inspected.origin, discovery: inspected.discovery, snapshot: inspected.snapshot } } : {}),
+    });
     if (result?.error) {
       setSubmitError(result.error);
       setSubmitting(false);
+    }
+  }
+
+  async function inspectOrigin() {
+    setInspecting(true);
+    setSubmitError("");
+    setInspected(null);
+    try {
+      const result = await fetchOpenShip(origin, {
+        maxDecodedBytes: 64 * 1024 * 1024,
+        allowLoopbackHttp: true,
+      });
+      setInspected(result);
+      if (!name.trim()) {
+        const slug = result.discovery.project.name
+          .trim()
+          .replace(/[^a-zA-Z0-9_-]+/g, "-")
+          .replace(/[-_]{2,}/g, "-")
+          .replace(/^[-_]+|[-_]+$/g, "")
+          .slice(0, 80);
+        setName(slug || "openship-project");
+      }
+      if (!description.trim()) setDescription(result.discovery.project.description);
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : "Unable to retrieve this OpenShip origin.");
+    } finally {
+      setInspecting(false);
     }
   }
 
@@ -141,6 +184,39 @@ function CreateProjectModal({ onClose, onCreate, onCheckName }: CreateModalProps
             ))}
           </div>
         </fieldset>
+
+        {requiresImport && (
+          <div className="field">
+            <label className="field-label" htmlFor="openship-origin">OpenShip origin</label>
+            <div className="openship-origin-row">
+              <input
+                id="openship-origin"
+                className="field-input"
+                type="url"
+                value={origin}
+                onChange={(event) => { setOrigin(event.target.value); setInspected(null); }}
+                placeholder="https://example.com"
+              />
+              <button type="button" className="btn btn-secondary" onClick={inspectOrigin} disabled={!origin.trim() || inspecting}>
+                {inspecting ? "Inspecting…" : "Inspect"}
+              </button>
+            </div>
+            {inspected && (
+              <div className="openship-import-summary" role="status">
+                <span className="project-badge">OpenShip {inspected.snapshot.kind === "systems" ? "Systems" : "Sources"}</span>
+                <strong>{inspected.discovery.project.name}</strong>
+                <span>{inspected.verified.manifest.totals.files} files · {Math.round(inspected.verified.manifest.totals.bytes / 1024)} KB</span>
+                <span>
+                  Capabilities: Sources
+                  {inspected.discovery.capabilities.systems ? ", Systems" : ""}
+                  {inspected.discovery.capabilities.changes ? ", Changes" : ""}
+                </span>
+                <code>{inspected.verified.manifest.digest}</code>
+                {inspected.snapshot.kind === "sources" && <span>Architecture will remain root-only until you analyze it.</span>}
+              </div>
+            )}
+          </div>
+        )}
 
         <label className="field">
           <span className="field-label">Description</span>
@@ -200,6 +276,11 @@ interface HomeProps {
     description: string;
     template: string;
     visibility: ProjectVisibility;
+    openshipImport?: {
+      origin: string;
+      discovery: DiscoveryDocument;
+      snapshot: { kind: "sources"; manifest: SourcesManifest; bundle: SourcesBundle } | { kind: "systems"; document: SystemsDocument };
+    };
   }) => Promise<{ error?: string } | void>;
   onCheckProjectName?: (name: string) => Promise<boolean>;
 }

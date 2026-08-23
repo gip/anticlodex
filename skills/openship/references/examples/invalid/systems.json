@@ -1,0 +1,34 @@
+{
+  "openship": "1.0",
+  "capability": "systems",
+  "source": {
+    "manifest": {
+      "openship": "1.0",
+      "capability": "sources",
+      "digest": "sha256:1d322539e651a3c2d7c51eb8b33160627395b9601bff909e599771b806d9e565",
+      "project": { "name": "Broken", "description": "The runtime edge targets a Library." },
+      "totals": { "files": 0, "bytes": 0 },
+      "files": []
+    },
+    "bundle": {
+      "openship": "1.0",
+      "capability": "sources",
+      "digest": "sha256:1d322539e651a3c2d7c51eb8b33160627395b9601bff909e599771b806d9e565",
+      "files": {}
+    }
+  },
+  "system": {
+    "id": "broken",
+    "name": "Broken",
+    "rootNodeId": "s.root",
+    "nodes": [
+      { "id": "s.root", "kind": "Root", "name": "Broken" },
+      { "id": "h.runtime", "kind": "Host", "name": "Runtime", "parentId": "s.root" },
+      { "id": "p.web", "kind": "Process", "name": "Web", "parentId": "h.runtime" },
+      { "id": "l.config", "kind": "Library", "name": "Config" }
+    ],
+    "edges": [
+      { "id": "e.invalid", "type": "Runtime", "fromNodeId": "p.web", "toNodeId": "l.config" }
+    ]
+  }
+}

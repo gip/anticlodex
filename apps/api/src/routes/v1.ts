@@ -3,8 +3,14 @@ import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
+import {
+  OpenShipValidationError,
+  normalizeOpenShipOrigin,
+  validateDiscovery,
+  validateSources,
+} from "@openshipdev/protocol";
 
 import pool, { query } from "../db.js";
 import { generateOpenShipFileBundle } from "../agent-runner.js";
@@ -35,6 +41,15 @@ import {
   type TemplateDefinition,
   type TemplateDocument,
 } from "../templates/index.js";
+import {
+  emptySources,
+  exportSources,
+  exportSourcesDigest,
+  exportSystems,
+  persistSources,
+  populateOpenShipSystem,
+  verifyImportSnapshot,
+} from "../openship-v1.js";
 
 type AccessRole = "Owner" | "Editor" | "Viewer";
 type V1OpenShipNodeKind = "Root" | "Host" | "Container" | "Process" | "Library";
@@ -533,6 +548,7 @@ function writeProblem(
   status: number,
   title: string,
   detail: string,
+  code?: string,
 ): void {
   reply.code(status).type("application/problem+json").send({
     type: "https://tools.ietf.org/html/rfc7807#section-3.1",
@@ -540,6 +556,7 @@ function writeProblem(
     status,
     detail,
     instance: reply.request.url,
+    ...(code ? { code } : {}),
   });
 }
 
@@ -854,7 +871,7 @@ async function resolveProjectAccess(projectId: string, user: AuthUser): Promise<
 async function resolveProjectAccessByHandle(
   handle: string,
   projectName: string,
-  user: AuthUser,
+  user: AuthUser | null,
 ): Promise<V1ProjectAccessRow | null> {
   const normalizedHandle = handle.trim();
   const normalizedProjectName = projectName.trim();
@@ -881,7 +898,7 @@ async function resolveProjectAccessByHandle(
      WHERE lower(owner_u.handle) = lower($1)
        AND p.name = $2
      LIMIT 1`,
-    [normalizedHandle, normalizedProjectName, user.id],
+    [normalizedHandle, normalizedProjectName, user?.id ?? null],
   );
   if (result.rowCount === 0) return null;
 
@@ -1323,6 +1340,19 @@ async function publishThreadMatrixChanged(threadId: string, user: AuthUser, aggr
 }
 
 export async function v1Routes(app: FastifyInstance) {
+  app.setErrorHandler((error: FastifyError, req, reply) => {
+    if (error.code === "FST_ERR_CTP_BODY_TOO_LARGE" && req.url.includes("/projects/imports/openship")) {
+      writeProblem(
+        reply,
+        413,
+        "OpenShip import wire payload is too large",
+        "The encoded JSON request exceeds the 96 MiB import limit.",
+        "openship_wire_too_large",
+      );
+      return;
+    }
+    reply.send(error);
+  });
   app.addHook("preHandler", async (req, reply) => {
     const routeUrl = req.routeOptions.url;
     const isOptionalReadRoute = req.method === "GET"
@@ -1333,6 +1363,7 @@ export async function v1Routes(app: FastifyInstance) {
         || routeUrl === "/v1/threads"
         || routeUrl === "/threads/:threadId"
         || routeUrl === "/v1/threads/:threadId"
+        || routeUrl?.includes("/projects/:handle/:projectName/openship") === true
       );
 
     if (isOptionalReadRoute) {
@@ -1342,6 +1373,64 @@ export async function v1Routes(app: FastifyInstance) {
     }
 
     if (reply.sent) return;
+  });
+
+  app.addHook("preHandler", async (req, reply) => {
+    if (["GET", "HEAD", "OPTIONS"].includes(req.method) || reply.sent) return;
+    const params = (req.params ?? {}) as Record<string, string | undefined>;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const querystring = (req.query ?? {}) as Record<string, unknown>;
+    let legacy = false;
+    if (params.threadId) {
+      const result = await query<{ spec_version: string }>(
+        `SELECT s.spec_version FROM systems s WHERE s.id=thread_current_system($1)`,
+        [params.threadId],
+      );
+      legacy = result.rows[0]?.spec_version === "openship/v1";
+      if (!result.rows[0] && /^\d+$/.test(params.threadId) && typeof querystring.projectId === "string") {
+        const scoped = await query<{ spec_version: string }>(
+          `SELECT s.spec_version FROM threads t
+           JOIN systems s ON s.id=thread_current_system(t.id)
+           WHERE t.project_id=$1 AND t.project_thread_id=$2 LIMIT 1`,
+          [querystring.projectId, Number(params.threadId)],
+        );
+        legacy = scoped.rows[0]?.spec_version === "openship/v1";
+      }
+    } else if (params.runId) {
+      const result = await query<{ spec_version: string }>(
+        `SELECT s.spec_version FROM agent_runs ar
+         JOIN systems s ON s.id=thread_current_system(ar.thread_id) WHERE ar.id=$1`,
+        [params.runId],
+      );
+      legacy = result.rows[0]?.spec_version === "openship/v1";
+    } else if (typeof body.projectId === "string") {
+      const result = await query<{ spec_version: string }>(
+        `SELECT s.spec_version FROM threads t
+         JOIN systems s ON s.id=thread_current_system(t.id)
+         WHERE t.project_id=$1 AND t.source_thread_id IS NULL ORDER BY t.project_thread_id LIMIT 1`,
+        [body.projectId],
+      );
+      legacy = result.rows[0]?.spec_version === "openship/v1";
+    } else if (params.handle && params.projectName) {
+      const result = await query<{ spec_version: string }>(
+        `SELECT s.spec_version FROM projects p
+         JOIN users u ON u.id=p.owner_id
+         JOIN threads t ON t.project_id=p.id AND t.source_thread_id IS NULL
+         JOIN systems s ON s.id=thread_current_system(t.id)
+         WHERE u.handle=$1 AND p.name=$2 LIMIT 1`,
+        [params.handle, params.projectName],
+      );
+      legacy = result.rows[0]?.spec_version === "openship/v1";
+    }
+    if (legacy) {
+      writeProblem(
+        reply,
+        409,
+        "Legacy OpenShip project is view-only",
+        "Re-import this origin or create an OpenShip 1.0 project before making changes.",
+        "legacy_openship_project",
+      );
+    }
   });
 
   app.get<{ Querystring: { page?: number; pageSize?: number; name?: string } }>(
@@ -1532,7 +1621,7 @@ export async function v1Routes(app: FastifyInstance) {
         );
         await client.query(
           `INSERT INTO systems (id, name, root_node_id, metadata, spec_version)
-           VALUES ($1, $2, $3, $4::jsonb, 'openship/v1')`,
+           VALUES ($1, $2, $3, $4::jsonb, '1.0')`,
           [
             systemId,
             name,
@@ -1576,6 +1665,14 @@ export async function v1Routes(app: FastifyInstance) {
             bundleFiles: templateBundleFiles,
           });
         }
+        const empty = emptySources({ name, description: description ?? `Anticlodex project ${name}.` });
+        const verified = validateSources(empty.manifest, empty.bundle);
+        await persistSources(client, verified);
+        await client.query(
+          `INSERT INTO system_sources (system_id,current_digest,upstream_base_digest)
+           VALUES ($1,$2,$2)`,
+          [systemId, verified.manifest.digest],
+        );
 
         await client.query("COMMIT");
         inTransaction = false;
@@ -1601,6 +1698,129 @@ export async function v1Routes(app: FastifyInstance) {
     },
   );
 
+  app.post<{
+    Body: {
+      origin?: string;
+      name?: string;
+      description?: string;
+      visibility?: V1ProjectVisibility;
+      discovery?: unknown;
+      snapshot?: unknown;
+    };
+  }>(
+    "/projects/imports/openship",
+    { bodyLimit: 96 * 1024 * 1024 },
+    async (req, reply) => {
+      const user = (req as V1AuthRequest).auth;
+      const name = req.body?.name?.trim();
+      const description = req.body?.description?.trim();
+      const visibility = req.body?.visibility ?? "private";
+      if (!name || !/^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?$/.test(name) || name.length > 80) {
+        return writeProblem(reply, 400, "Invalid project name", "Use a valid project name of at most 80 characters.");
+      }
+      if (!description) return writeProblem(reply, 400, "Invalid description", "description is required.");
+      if (visibility !== "public" && visibility !== "private") {
+        return writeProblem(reply, 400, "Invalid visibility", "visibility must be public or private.");
+      }
+
+      let origin: string;
+      let discovery: ReturnType<typeof validateDiscovery>;
+      let imported: ReturnType<typeof verifyImportSnapshot>;
+      try {
+        origin = normalizeOpenShipOrigin(req.body.origin ?? "", { allowLoopbackHttp: true });
+        discovery = validateDiscovery(req.body.discovery);
+        imported = verifyImportSnapshot(req.body.snapshot);
+        if (
+          discovery.project.name !== imported.verified.manifest.project.name
+          || discovery.project.description !== imported.verified.manifest.project.description
+        ) {
+          throw new OpenShipValidationError(
+            "$.discovery.project",
+            "must match the imported Sources project metadata",
+            "inconsistent_discovery",
+          );
+        }
+        if (imported.kind === "systems" && !discovery.capabilities.systems) {
+          throw new OpenShipValidationError(
+            "$.discovery.capabilities.systems",
+            "must advertise the imported Systems document",
+            "inconsistent_discovery",
+          );
+        }
+      } catch (error) {
+        const detail = error instanceof OpenShipValidationError ? error.message : error instanceof Error ? error.message : String(error);
+        return writeProblem(
+          reply,
+          error instanceof OpenShipValidationError && error.code === "source_too_large" ? 413 : 422,
+          "Invalid OpenShip import",
+          detail,
+          error instanceof OpenShipValidationError ? error.code : "invalid_openship_import",
+        );
+      }
+
+      const existing = await query<{ id: string }>(
+        "SELECT id FROM projects WHERE owner_id=$1 AND name=$2",
+        [user.id, name],
+      );
+      if ((existing.rowCount ?? 0) > 0) {
+        return writeProblem(reply, 409, "Duplicate project", "A project with this name already exists.");
+      }
+
+      const projectId = randomUUID();
+      const threadId = randomUUID();
+      const systemId = randomUUID();
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          `INSERT INTO projects (id,name,description,visibility,owner_id) VALUES ($1,$2,$3,$4,$5)`,
+          [projectId, name, description, visibility, user.id],
+        );
+        await populateOpenShipSystem(client, {
+          systemId,
+          fallbackName: discovery.project.name,
+          origin,
+          discovery,
+          verified: imported.verified,
+          systems: imported.systems,
+        });
+        await client.query(
+          "SELECT create_thread($1,$2,$3,$4,$5,$6)",
+          [threadId, projectId, user.id, systemId, "OpenShip Import", `Imported ${origin}`],
+        );
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        req.log.error({ error, origin }, "OpenShip import failed");
+        if ((error as { code?: string }).code === "23505") {
+          return writeProblem(reply, 409, "Duplicate project", "A project with this name already exists.");
+        }
+        return writeProblem(reply, 422, "OpenShip import failed", error instanceof Error ? error.message : String(error));
+      } finally {
+        client.release();
+      }
+
+      return reply.code(201).send({
+        id: projectId,
+        name,
+        description,
+        visibility,
+        accessRole: "Owner",
+        ownerHandle: user.handle,
+        createdAt: new Date().toISOString(),
+        threadCount: 1,
+        threads: [{ id: threadId, title: "OpenShip Import", description: `Imported ${origin}`, status: "open", updatedAt: new Date().toISOString() }],
+        openship: {
+          origin,
+          digest: imported.verified.manifest.digest,
+          capability: imported.kind,
+          files: imported.verified.manifest.totals.files,
+          bytes: imported.verified.manifest.totals.bytes,
+        },
+      });
+    },
+  );
+
   app.get<{ Querystring: { name?: string } }>(
     "/projects/check-name",
     async (req, reply) => {
@@ -1614,6 +1834,183 @@ export async function v1Routes(app: FastifyInstance) {
         [user.id, name],
       );
       return { available: exists.rowCount === 0 };
+    },
+  );
+
+  app.get<{ Params: { handle: string; projectName: string } }>(
+    "/projects/:handle/:projectName/openship",
+    async (req, reply) => {
+      const user = getOptionalAuthUser(req);
+      const project = await resolveProjectAccessByHandle(req.params.handle, req.params.projectName, user);
+      if (!project) return writeProblem(reply, 404, "Project not found", "Project not found or access denied.");
+      const systemId = await resolveProjectSystemId(project.project_id);
+      if (!systemId) return writeProblem(reply, 404, "Project system not found", "Project system not found.");
+      const result = await query<{
+        spec_version: string; origin: string | null; current_digest: string | null;
+        upstream_base_digest: string | null; discovery: Record<string, unknown> | null;
+        total_files: string | null; total_bytes: string | null;
+      }>(
+        `SELECT s.spec_version,ss.origin,ss.current_digest,ss.upstream_base_digest,ss.discovery,
+                snap.total_files::text,snap.total_bytes::text
+         FROM systems s
+         LEFT JOIN system_sources ss ON ss.system_id=s.id
+         LEFT JOIN source_snapshots snap ON snap.digest=ss.current_digest
+         WHERE s.id=$1`,
+        [systemId],
+      );
+      const row = result.rows[0];
+      const files = row.current_digest
+        ? await query<{ path: string; encoding: string; file_type: string; media_type: string; target: string | null; size: string }>(
+          `SELECT path,encoding,file_type,media_type,target,size::text FROM source_files
+           WHERE snapshot_digest=$1 ORDER BY path COLLATE "C"`,
+          [row.current_digest],
+        )
+        : { rows: [] };
+      return {
+        version: row.spec_version,
+        legacy: row.spec_version !== "1.0",
+        origin: row.origin,
+        currentDigest: row.current_digest,
+        upstreamBaseDigest: row.upstream_base_digest,
+        discovery: row.discovery,
+        validationState: row.spec_version === "1.0" && row.current_digest ? "verified" : "legacy",
+        capabilities: (row.discovery?.capabilities as Record<string, unknown> | undefined) ?? null,
+        totals: row.total_files === null ? null : { files: Number(row.total_files), bytes: Number(row.total_bytes) },
+        files: files.rows.map((file) => ({ ...file, size: Number(file.size) })),
+      };
+    },
+  );
+
+  app.get<{ Params: { handle: string; projectName: string } }>(
+    "/projects/:handle/:projectName/openship/upstream.json",
+    async (req, reply) => {
+      const user = getOptionalAuthUser(req);
+      const project = await resolveProjectAccessByHandle(req.params.handle, req.params.projectName, user);
+      if (!project) return writeProblem(reply, 404, "Project not found", "Project not found or access denied.");
+      const systemId = await resolveProjectSystemId(project.project_id);
+      if (!systemId) return writeProblem(reply, 404, "Project system not found", "Project system not found.");
+      const result = await query<{ upstream_base_digest: string }>(
+        "SELECT upstream_base_digest FROM system_sources WHERE system_id=$1",
+        [systemId],
+      );
+      const digest = result.rows[0]?.upstream_base_digest;
+      if (!digest) return writeProblem(reply, 409, "OpenShip upstream unavailable", "This project has no upstream base snapshot.");
+      try { return await exportSourcesDigest(pool, digest); }
+      catch (error) { return writeProblem(reply, 409, "OpenShip upstream unavailable", error instanceof Error ? error.message : String(error)); }
+    },
+  );
+
+  app.get<{ Params: { handle: string; projectName: string } }>(
+    "/projects/:handle/:projectName/openship/remote-changes",
+    async (req, reply) => {
+      const user = getOptionalAuthUser(req);
+      const project = await resolveProjectAccessByHandle(req.params.handle, req.params.projectName, user);
+      if (!project) return writeProblem(reply, 404, "Project not found", "Project not found or access denied.");
+      const systemId = await resolveProjectSystemId(project.project_id);
+      if (!systemId) return writeProblem(reply, 404, "Project system not found", "Project system not found.");
+      const result = await query<{
+        remote_change_id: string | null; base_digest: string; result_digest: string; submit_url: string;
+        status_url: string | null; candidate_origin: string | null; status: string; phase: string | null; response: unknown;
+      }>(
+        `SELECT id,remote_change_id,base_digest,result_digest,submit_url,status_url,candidate_origin,
+                status,phase,response,created_at,updated_at
+         FROM remote_changes WHERE system_id=$1 ORDER BY created_at DESC`,
+        [systemId],
+      );
+      return { changes: result.rows.map((row) => ({
+        remoteChangeId: row.remote_change_id,
+        baseDigest: row.base_digest,
+        resultDigest: row.result_digest,
+        submitUrl: row.submit_url,
+        statusUrl: row.status_url,
+        candidateOrigin: row.candidate_origin,
+        status: row.status,
+        phase: row.phase,
+        response: row.response,
+      })) };
+    },
+  );
+
+  app.post<{
+    Params: { handle: string; projectName: string };
+    Body: {
+      remoteChangeId?: string | null; baseDigest?: string; resultDigest?: string; submitUrl?: string;
+      statusUrl?: string | null; candidateOrigin?: string | null; status?: string; phase?: string | null;
+      response?: unknown;
+    };
+  }>(
+    "/projects/:handle/:projectName/openship/remote-changes",
+    async (req, reply) => {
+      const user = (req as V1AuthRequest).auth;
+      const project = await resolveProjectAccessByHandle(req.params.handle, req.params.projectName, user);
+      if (!project || !canEdit(project.access_role)) return writeProblem(reply, 404, "Project not found", "Project not found or access denied.");
+      const systemId = await resolveProjectSystemId(project.project_id);
+      if (!systemId) return writeProblem(reply, 404, "Project system not found", "Project system not found.");
+      const status = req.body?.status;
+      if (!status || !["pending", "processing", "ready", "rejected", "failed", "unsupported"].includes(status)) {
+        return writeProblem(reply, 400, "Invalid Changes status", "status must be pending, processing, ready, rejected, failed, or unsupported.");
+      }
+      if (!req.body.baseDigest || !req.body.resultDigest || !req.body.submitUrl) {
+        return writeProblem(reply, 400, "Invalid Changes record", "baseDigest, resultDigest, and submitUrl are required.");
+      }
+      const record = await query(
+        `INSERT INTO remote_changes (
+           system_id,remote_change_id,base_digest,result_digest,submit_url,status_url,candidate_origin,status,phase,response
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
+         RETURNING *`,
+        [
+          systemId,
+          req.body.remoteChangeId?.trim() || null,
+          req.body.baseDigest,
+          req.body.resultDigest,
+          req.body.submitUrl,
+          req.body.statusUrl ?? null,
+          req.body.candidateOrigin ?? null,
+          status,
+          req.body.phase ?? null,
+          JSON.stringify(req.body.response ?? {}),
+        ],
+      );
+      return reply.code(201).send(record.rows[0]);
+    },
+  );
+
+  app.get<{ Params: { handle: string; projectName: string } }>(
+    "/projects/:handle/:projectName/openship/manifest.json",
+    async (req, reply) => {
+      const user = getOptionalAuthUser(req);
+      const project = await resolveProjectAccessByHandle(req.params.handle, req.params.projectName, user);
+      if (!project) return writeProblem(reply, 404, "Project not found", "Project not found or access denied.");
+      const systemId = await resolveProjectSystemId(project.project_id);
+      if (!systemId) return writeProblem(reply, 404, "Project system not found", "Project system not found.");
+      try { return (await exportSources(pool, systemId)).manifest; }
+      catch (error) { return writeProblem(reply, 409, "OpenShip export unavailable", error instanceof Error ? error.message : String(error)); }
+    },
+  );
+
+  app.get<{ Params: { handle: string; projectName: string } }>(
+    "/projects/:handle/:projectName/openship/bundle.json",
+    async (req, reply) => {
+      const user = getOptionalAuthUser(req);
+      const project = await resolveProjectAccessByHandle(req.params.handle, req.params.projectName, user);
+      if (!project) return writeProblem(reply, 404, "Project not found", "Project not found or access denied.");
+      const systemId = await resolveProjectSystemId(project.project_id);
+      if (!systemId) return writeProblem(reply, 404, "Project system not found", "Project system not found.");
+      try { return (await exportSources(pool, systemId)).bundle; }
+      catch (error) { return writeProblem(reply, 409, "OpenShip export unavailable", error instanceof Error ? error.message : String(error)); }
+    },
+  );
+
+  app.get<{ Params: { handle: string; projectName: string } }>(
+    "/projects/:handle/:projectName/openship/system.json",
+    async (req, reply) => {
+      const user = getOptionalAuthUser(req);
+      const project = await resolveProjectAccessByHandle(req.params.handle, req.params.projectName, user);
+      if (!project) return writeProblem(reply, 404, "Project not found", "Project not found or access denied.");
+      const systemId = await resolveProjectSystemId(project.project_id);
+      if (!systemId) return writeProblem(reply, 404, "Project system not found", "Project system not found.");
+      try { return await exportSystems(pool, systemId); }
+      catch (error) { return writeProblem(reply, 409, "OpenShip export unavailable", error instanceof Error ? error.message : String(error)); }
     },
   );
 
@@ -3027,6 +3424,19 @@ export async function v1Routes(app: FastifyInstance) {
       }
 
       const runnerId = req.body?.runnerId?.trim() || `desktop-${randomUUID()}`;
+      const runSpec = await query<{ spec_version: string }>(
+        `SELECT s.spec_version FROM systems s WHERE s.id=thread_current_system($1)`,
+        [run.thread_id],
+      );
+      if (runSpec.rows[0]?.spec_version === "1.0" && runnerId.startsWith("desktop-")) {
+        return writeProblem(
+          reply,
+          409,
+          "OpenShip 1.0 run is server-managed",
+          "The API runner owns the isolated project/control workspace for OpenShip 1.0 runs.",
+          "openship_server_runner_required",
+        );
+      }
       const claimed = await claimAgentRunById(runId, runnerId);
       if (!claimed) {
         return writeProblem(reply, 409, "Run unavailable", "Run is not available for claiming");

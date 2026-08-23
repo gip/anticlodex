@@ -1,5 +1,5 @@
-import { mkdir, readFile, rm, readdir, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, normalize, posix, resolve } from "node:path";
+import { cp, lstat, mkdir, readFile, readlink, rm, readdir, stat, symlink, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, normalize, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { query } from "./db.js";
 import { claimNextAgentRun, updateAgentRunResult } from "./agent-queue.js";
@@ -17,39 +17,27 @@ import {
   snapshotOpenShipBundle,
   summarizeOpenShipBundleChanges,
 } from "@acx/agent-runtime";
+import {
+  compareUtf8,
+  computeSourcesDigest,
+  sha256Hex,
+  validateSources,
+  validateSystems,
+  type SourceFileMetadata,
+  type SourcesBundle,
+  type SourcesManifest,
+  type SystemsDocument,
+  type VerifiedSources,
+} from "@openshipdev/protocol";
+import { applyOpenShipV1DocumentToThread, exportSystems } from "./openship-v1.js";
+import pool from "./db.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 1000;
 const DEFAULT_RUNNER_ID = process.env.ACX_AGENT_RUNNER_ID || "api-worker";
 const OPENSHIP_BUNDLE_DIR_NAME = "openship";
 const OPENSHIP_MANIFEST_FILE_NAME = "openship.yaml";
 const OPENSHIP_ROOT_NODE_ID = "s.root";
-const OPENSHIP_AGENT_SPEC_FILE_NAME = "SKILL.md";
-const OPENSHIP_AGENT_LEGACY_SPEC_FILE_NAME = "SKILLS.md";
-const OPENSHIP_BUNDLE_SPEC_FILE_NAME = "SKILLS.md";
-const OPENSHIP_BUNDLE_SPEC_REL_DIR = "openship-specs-v1";
 const OPENSHIP_AGENT_AGENTS_FILE_NAME = "AGENTS.md";
-const OPENSHIP_TEMPLATE_SPEC_CANDIDATES = [
-  resolve(process.cwd(), "skills", "openship-specs-v1", OPENSHIP_AGENT_SPEC_FILE_NAME),
-  resolve(process.cwd(), "skills", "openship-specs-v1", OPENSHIP_AGENT_LEGACY_SPEC_FILE_NAME),
-  resolve(
-    dirname(fileURLToPath(import.meta.url)),
-    "..",
-    "..",
-    "..",
-    "skills",
-    "openship-specs-v1",
-    OPENSHIP_AGENT_SPEC_FILE_NAME,
-  ),
-  resolve(
-    dirname(fileURLToPath(import.meta.url)),
-    "..",
-    "..",
-    "..",
-    "skills",
-    "openship-specs-v1",
-    OPENSHIP_AGENT_LEGACY_SPEC_FILE_NAME,
-  ),
-];
 const OPENSHIP_AGENT_AGENTS_CANDIDATES = [
   resolve(process.cwd(), "packages", "agent-runtime", OPENSHIP_AGENT_AGENTS_FILE_NAME),
   resolve(
@@ -61,6 +49,10 @@ const OPENSHIP_AGENT_AGENTS_CANDIDATES = [
     "agent-runtime",
     OPENSHIP_AGENT_AGENTS_FILE_NAME,
   ),
+];
+const OPENSHIP_V1_SKILL_CANDIDATES = [
+  resolve(process.cwd(), "skills", "openship"),
+  resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "skills", "openship"),
 ];
 
 const SYSTEM_PROMPT_CONCERN = "__system_prompt__";
@@ -253,34 +245,6 @@ function splitArtifactFrontMatter(artifact: ArtifactRow): string {
   return `${parts.join("\n")}\n`;
 }
 
-async function copyOpenShipSpec(bundleDir: string, workspace: string): Promise<void> {
-  let text: string | null = null;
-  for (const candidate of OPENSHIP_TEMPLATE_SPEC_CANDIDATES) {
-    const specText = await readFile(candidate, "utf8").catch(() => null);
-    if (specText === null) continue;
-    text = specText;
-    break;
-  }
-
-  if (text === null) {
-    console.warn("[agent-runner] OpenShip spec not found in candidate paths; skipping spec injection");
-    return;
-  }
-
-  await writeFileInDir(
-    join(bundleDir, OPENSHIP_BUNDLE_SPEC_FILE_NAME),
-    text,
-  );
-  await writeFileInDir(
-    join(bundleDir, "skills", OPENSHIP_BUNDLE_SPEC_REL_DIR, OPENSHIP_AGENT_SPEC_FILE_NAME),
-    text,
-  );
-  await writeFileInDir(
-    join(workspace, "skills", OPENSHIP_BUNDLE_SPEC_REL_DIR, OPENSHIP_AGENT_SPEC_FILE_NAME),
-    text,
-  );
-}
-
 async function copyOpenShipAgentsBootstrap(targetDir: string): Promise<void> {
   for (const candidate of OPENSHIP_AGENT_AGENTS_CANDIDATES) {
     const text = await readFile(candidate, "utf8").catch(() => null);
@@ -463,7 +427,6 @@ export async function generateOpenShipFileBundle(threadId: string, workspace: st
       ...(rootPromptRefs.size > 0 ? { systemPromptRefs: [...rootPromptRefs].sort() } : {}),
     }) + "\n",
   );
-  await copyOpenShipSpec(bundleDir, workspace);
   await copyOpenShipAgentsBootstrap(bundleDir);
   await copyOpenShipAgentsBootstrap(workspace);
 
@@ -709,6 +672,235 @@ interface RunClaudeAgentResult {
   openShipBundleFiles: OpenShipBundleFile[];
 }
 
+function isUtf8Source(bytes: Uint8Array): boolean {
+  if (bytes.includes(0)) return false;
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function mediaTypeForPath(path: string, text: boolean): string {
+  if (!text) return "application/octet-stream";
+  if (path.endsWith(".json")) return "application/json";
+  if (path.endsWith(".md") || path.endsWith(".mdx")) return "text/markdown";
+  if (path.endsWith(".html")) return "text/html";
+  if (path.endsWith(".css")) return "text/css";
+  if (path.endsWith(".yaml") || path.endsWith(".yml")) return "application/yaml";
+  if (path.endsWith(".js") || path.endsWith(".mjs") || path.endsWith(".ts") || path.endsWith(".tsx") || path.endsWith(".jsx")) return "text/plain";
+  return "text/plain";
+}
+
+async function findCanonicalOpenShipSkill(): Promise<string> {
+  for (const candidate of OPENSHIP_V1_SKILL_CANDIDATES) {
+    try {
+      if ((await stat(join(candidate, "SKILL.md"))).isFile()) return candidate;
+    } catch {
+      // Try the package-relative candidate.
+    }
+  }
+  throw new Error("The synchronized canonical skills/openship tree is missing.");
+}
+
+async function materializeOpenShipV1Workspace(
+  workspace: string,
+  document: SystemsDocument,
+  verified: VerifiedSources,
+): Promise<void> {
+  const projectDir = join(workspace, "project");
+  const controlDir = join(workspace, "control");
+  await rm(projectDir, { recursive: true, force: true });
+  await rm(controlDir, { recursive: true, force: true });
+  await mkdir(projectDir, { recursive: true });
+  await mkdir(controlDir, { recursive: true });
+
+  for (const file of verified.files.filter((entry) => entry.metadata.type === "file")) {
+    const destination = join(projectDir, ...file.metadata.path.split("/"));
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(destination, Buffer.from(file.bytes));
+  }
+  for (const file of verified.files.filter((entry) => entry.metadata.type === "symlink")) {
+    const destination = join(projectDir, ...file.metadata.path.split("/"));
+    const target = join(projectDir, ...String(file.metadata.target).split("/"));
+    await mkdir(dirname(destination), { recursive: true });
+    await symlink(relative(dirname(destination), target), destination);
+  }
+
+  await writeFile(join(controlDir, "system.json"), `${JSON.stringify(document, null, 2)}\n`, "utf8");
+  const skill = await findCanonicalOpenShipSkill();
+  await cp(skill, join(controlDir, "skills", "openship"), { recursive: true, force: true });
+}
+
+async function listProjectPaths(projectDir: string, current = ""): Promise<string[]> {
+  const directory = current ? join(projectDir, ...current.split("/")) : projectDir;
+  const entries = await readdir(directory, { withFileTypes: true });
+  const paths: string[] = [];
+  for (const entry of entries) {
+    const path = current ? `${current}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      if ([".git", "node_modules", ".next", "dist", "build", "coverage"].includes(entry.name)) continue;
+      paths.push(...await listProjectPaths(projectDir, path));
+    } else if (entry.isFile() || entry.isSymbolicLink()) {
+      paths.push(path);
+    }
+  }
+  return paths.sort(compareUtf8);
+}
+
+async function snapshotOpenShipV1Project(
+  projectDir: string,
+  base: { manifest: SourcesManifest; bundle: SourcesBundle },
+): Promise<{ manifest: SourcesManifest; bundle: SourcesBundle; verified: VerifiedSources }> {
+  const baseFiles = new Map(base.manifest.files.map((file) => [file.path, file]));
+  const metadata: SourceFileMetadata[] = [];
+  const bundleFiles: SourcesBundle["files"] = {};
+  for (const path of await listProjectPaths(projectDir)) {
+    const absolutePath = join(projectDir, ...path.split("/"));
+    const fileStat = await lstat(absolutePath);
+    const bytes = new Uint8Array(await readFile(absolutePath));
+    const previous = baseFiles.get(path);
+    const text = isUtf8Source(bytes);
+    const encoding = text ? "utf-8" : "base64";
+    let target: string | undefined;
+    if (fileStat.isSymbolicLink()) {
+      const rawTarget = await readlink(absolutePath);
+      const resolvedTarget = resolve(dirname(absolutePath), rawTarget);
+      target = relative(projectDir, resolvedTarget).split("\\").join("/");
+    }
+    metadata.push({
+      ...(previous ?? {}),
+      path,
+      size: bytes.byteLength,
+      sha256: sha256Hex(bytes),
+      encoding,
+      mediaType: previous?.mediaType ?? mediaTypeForPath(path, text),
+      type: fileStat.isSymbolicLink() ? "symlink" : "file",
+      ...(target ? { target } : {}),
+    });
+    bundleFiles[path] = {
+      encoding,
+      content: encoding === "base64" ? Buffer.from(bytes).toString("base64") : new TextDecoder().decode(bytes),
+    };
+  }
+  const digest = computeSourcesDigest(metadata);
+  const manifest = {
+    ...base.manifest,
+    digest,
+    ...(digest !== base.manifest.digest ? { parent: base.manifest.digest } : {}),
+    totals: { files: metadata.length, bytes: metadata.reduce((total, file) => total + file.size, 0) },
+    files: metadata,
+  } as SourcesManifest;
+  const bundle = {
+    ...base.bundle,
+    digest,
+    files: bundleFiles,
+  } as SourcesBundle;
+  return { manifest, bundle, verified: validateSources(manifest, bundle) };
+}
+
+function sourcePlanChanges(before: VerifiedSources, after: VerifiedSources): AgentRunPlanChange[] {
+  const beforeByPath = new Map(before.files.map((file) => [file.metadata.path, file.metadata]));
+  const afterByPath = new Map(after.files.map((file) => [file.metadata.path, file.metadata]));
+  const paths = [...new Set([...beforeByPath.keys(), ...afterByPath.keys()])].sort(compareUtf8);
+  return paths.flatMap((path) => {
+    const previous = beforeByPath.get(path) ?? null;
+    const current = afterByPath.get(path) ?? null;
+    if (JSON.stringify(previous) === JSON.stringify(current)) return [];
+    return [{
+      target_table: "source_files",
+      operation: previous ? (current ? "Update" : "Delete") : "Create",
+      target_id: { path },
+      previous: previous as Record<string, unknown> | null,
+      current: current as Record<string, unknown> | null,
+    } satisfies AgentRunPlanChange];
+  });
+}
+
+async function runOpenShipV1AgentWithWorkspace(
+  runPrompt: string,
+  systemPrompt: string | null,
+  workspace: string,
+  threadId: string,
+  model: string | undefined,
+): Promise<RunClaudeAgentResult> {
+  const systemIdResult = await query<{ system_id: string; spec_version: string }>(
+    `SELECT s.id AS system_id,s.spec_version FROM systems s WHERE s.id=thread_current_system($1)`,
+    [threadId],
+  );
+  if (systemIdResult.rows[0]?.spec_version !== "1.0") {
+    throw new Error("legacy_openship_project: re-import this project to run an agent with OpenShip 1.0.");
+  }
+  const original = await exportSystems(pool, systemIdResult.rows[0].system_id);
+  const originalVerified = validateSources(original.source.manifest, original.source.bundle);
+  await materializeOpenShipV1Workspace(workspace, original, originalVerified);
+
+  const instructions = [
+    "This is an OpenShip 1.0 workspace.",
+    "Edit source files only under project/.",
+    "Edit architecture and context only in control/system.json.",
+    "Do not edit control/skills/openship; it is the canonical protocol skill.",
+    "The server will rebuild the Sources snapshot from project/ and will only accept the system portion of control/system.json.",
+  ].join("\n");
+  let result: AgentRunResult;
+  try {
+    result = await runAgent({
+      prompt: `${instructions}\n\nUser request:\n${runPrompt}`,
+      cwd: workspace,
+      model,
+      systemPrompt: [systemPrompt, instructions].filter(Boolean).join("\n\n"),
+      allowedTools: ["Read", "Grep", "Glob", "Bash", "Edit", "Write"],
+    });
+  } catch (error) {
+    const message = runSummaryError(error);
+    return { status: "failed", messages: [`Execution failed: ${message}`], changes: [], error: message, openShipBundleFiles: [] };
+  }
+  if (result.status === "failed") return { ...result, openShipBundleFiles: [] };
+
+  try {
+    const rebuilt = await snapshotOpenShipV1Project(join(workspace, "project"), original.source);
+    const edited = JSON.parse(await readFile(join(workspace, "control", "system.json"), "utf8")) as SystemsDocument;
+    const candidate = validateSystems({
+      openship: "1.0",
+      capability: "systems",
+      source: { manifest: rebuilt.manifest, bundle: rebuilt.bundle },
+      system: edited.system,
+    });
+    const sourceChanged = rebuilt.manifest.digest !== original.source.manifest.digest;
+    const systemChanged = JSON.stringify(candidate.system) !== JSON.stringify(original.system);
+    if (!sourceChanged && !systemChanged) {
+      return { ...result, messages: [...result.messages, "OpenShip workspace: no changes."], changes: [], openShipBundleFiles: [] };
+    }
+    await applyOpenShipV1DocumentToThread(threadId, candidate);
+    const changes = sourcePlanChanges(originalVerified, rebuilt.verified);
+    if (systemChanged) {
+      changes.push({
+        target_table: "systems",
+        operation: "Update",
+        target_id: { threadId },
+        previous: original.system,
+        current: candidate.system,
+      });
+    }
+    return {
+      ...result,
+      messages: [...result.messages, `OpenShip workspace reconciled (${changes.length} change${changes.length === 1 ? "" : "s"}).`],
+      changes,
+      openShipBundleFiles: [],
+    };
+  } catch (error) {
+    const message = runSummaryError(error);
+    return {
+      status: "failed",
+      messages: [...result.messages, `OpenShip 1.0 reconciliation failed: ${message}`],
+      changes: result.changes,
+      error: message,
+      openShipBundleFiles: [],
+    };
+  }
+}
+
 async function runClaudeAgentWithBundleDiff(
   runPrompt: string,
   systemPrompt: string | null,
@@ -865,9 +1057,7 @@ async function runAgentAndApplyResult(
   threadId: string,
   model: string | undefined,
 ): Promise<RunClaudeAgentResult> {
-  const runResult = await runClaudeAgentWithBundleDiff(runPrompt, systemPrompt, workspace, threadId, model);
-  const reconciled = await applyOpenShipBundleResult(threadId, runResult);
-  return reconciled;
+  return runOpenShipV1AgentWithWorkspace(runPrompt, systemPrompt, workspace, threadId, model);
 }
 
 function sleep(ms: number): Promise<void> {

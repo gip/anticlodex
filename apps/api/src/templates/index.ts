@@ -1,5 +1,4 @@
 import { templateWebserverPostgresAuth0GoogleVercel } from "./template-webserver-postgres-auth0-google-vercel.js";
-import { templateAcxOpenShipBundleImport } from "./template-self-import.js";
 
 export interface DefaultConcern {
   name: string;
@@ -21,9 +20,7 @@ export const DEFAULT_CONCERNS: DefaultConcern[] = [
 ];
 
 export const BLANK_TEMPLATE_ID = "blank" as const;
-export type NonBlankTemplateId =
-  | "webserver-postgres-auth0-google-vercel"
-  | "acx-openship-bundle-import";
+export type NonBlankTemplateId = "webserver-postgres-auth0-google-vercel";
 export type TemplateId = typeof BLANK_TEMPLATE_ID | NonBlankTemplateId;
 
 export type TemplateNodeKind = "Host" | "Container" | "Process" | "Library";
@@ -91,7 +88,6 @@ export interface TemplateDefinition {
 
 const templateRegistry: Record<NonBlankTemplateId, TemplateDefinition> = {
   "webserver-postgres-auth0-google-vercel": templateWebserverPostgresAuth0GoogleVercel,
-  "acx-openship-bundle-import": templateAcxOpenShipBundleImport,
 };
 
 export function isKnownTemplateId(templateId: string): templateId is TemplateId {

@@ -19,7 +19,7 @@ function normalizeApiUrl(raw: string): string {
 const API_URL = normalizeApiUrl(import.meta.env.VITE_API_URL ?? "http://localhost:3001");
 const DEFAULT_RUNNER_ID = process.env.ACX_AGENT_RUNNER_ID ?? "desktop-runner";
 const AGENTS_BOOTSTRAP_FILE_NAME = "AGENTS.md";
-const OPENSHIP_SPEC_WORKSPACE_FILE_PATH = "skills/openship-specs-v1/SKILL.md";
+const OPENSHIP_SPEC_WORKSPACE_FILE_PATH = "control/skills/openship/SKILL.md";
 
 interface AssistantRunClaimResponse {
   runId: string;

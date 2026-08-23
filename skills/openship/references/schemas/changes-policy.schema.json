@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openship.dev/schemas/changes-policy.schema.json",
+  "title": "OpenShip Changes v1 policy",
+  "type": "object",
+  "required": ["openship", "capability", "writable", "protected", "limits"],
+  "properties": {
+    "openship": { "const": "1.0" },
+    "capability": { "const": "changes" },
+    "writable": { "type": "array", "items": { "$ref": "#/$defs/pattern" }, "uniqueItems": true },
+    "protected": { "type": "array", "items": { "$ref": "#/$defs/pattern" }, "uniqueItems": true },
+    "limits": {
+      "type": "object",
+      "required": ["filesPerChange", "bytesPerFile", "bytesPerChange"],
+      "properties": {
+        "filesPerChange": { "type": "integer", "minimum": 1 },
+        "bytesPerFile": { "type": "integer", "minimum": 1 },
+        "bytesPerChange": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": true
+    },
+    "contentRules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "rule", "message"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "rule": { "type": "string", "minLength": 1 },
+          "message": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": true
+      }
+    },
+    "document": { "type": "string", "format": "uri" },
+    "payment": { "type": "object", "additionalProperties": true },
+    "authorization": { "type": "object", "additionalProperties": true }
+  },
+  "$defs": {
+    "pattern": { "type": "string", "minLength": 1, "pattern": "^(?!/)(?:[^*]+|[^*]+/\\*\\*)$" }
+  },
+  "additionalProperties": true
+}
+

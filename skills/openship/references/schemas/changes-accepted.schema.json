@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openship.dev/schemas/changes-accepted.schema.json",
+  "title": "OpenShip Changes v1 accepted response",
+  "$ref": "changes-status.schema.json",
+  "allOf": [
+    {
+      "type": "object",
+      "required": ["statusUrl"],
+      "properties": {
+        "status": { "enum": ["pending", "processing", "ready"] },
+        "statusUrl": { "type": "string", "format": "uri" }
+      }
+    }
+  ]
+}
+

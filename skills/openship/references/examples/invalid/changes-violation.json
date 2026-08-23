@@ -1,0 +1,7 @@
+{
+  "openship": "1.0",
+  "capability": "changes",
+  "error": "policy_violation",
+  "message": "The response forgot to identify any violation.",
+  "violations": []
+}

@@ -4,19 +4,37 @@ import { Link } from "./link";
 import { isFinalizedThreadStatus, type Project, type Thread } from "./home";
 import type { ThreadDetail } from "./thread-page";
 import { renderMarkdown } from "./markdown";
+import type { OpenShipRemoteChange } from "./openship-changes";
 
 interface MutationError {
   error: string;
+}
+
+export interface OpenShipProjectInfo {
+  version: string;
+  legacy: boolean;
+  origin: string | null;
+  currentDigest: string | null;
+  upstreamBaseDigest: string | null;
+  discovery: Record<string, unknown> | null;
+  validationState: "verified" | "legacy";
+  capabilities: Record<string, unknown> | null;
+  totals: { files: number; bytes: number } | null;
+  files: Array<{ path: string; encoding: string; file_type: string; media_type: string; target: string | null; size: number }>;
 }
 
 type MutationResult<T> = T | MutationError | void;
 
 interface ProjectPageProps {
   project: Project;
+  openship?: OpenShipProjectInfo | null;
   fromThreadId?: string | null;
   onCloseThread?: (threadId: string) => Promise<MutationResult<{ thread: ThreadDetail }>>;
   onCommitThread?: (threadId: string) => Promise<MutationResult<{ thread: ThreadDetail }>>;
   onUpdateDescription?: (description: string | null) => Promise<MutationResult<{ description: string | null }>>;
+  onSubmitOpenShipChanges?: (title: string, intent: string) => Promise<MutationResult<OpenShipRemoteChange>>;
+  onListOpenShipChanges?: () => Promise<MutationResult<OpenShipRemoteChange[]>>;
+  onPollOpenShipChange?: (change: OpenShipRemoteChange) => Promise<MutationResult<OpenShipRemoteChange>>;
   onCloneThread?: (
     threadId: string,
     payload: {
@@ -81,10 +99,14 @@ function flattenThreadTree(threads: Thread[], fromProjectThreadId?: string | nul
 
 export function ProjectPage({
   project,
+  openship,
   fromThreadId,
   onCloseThread,
   onCommitThread,
   onUpdateDescription,
+  onSubmitOpenShipChanges,
+  onListOpenShipChanges,
+  onPollOpenShipChange,
   onCloneThread,
 }: ProjectPageProps) {
   const [cloningThreadId, setCloningThreadId] = useState<string | null>(null);
@@ -103,6 +125,28 @@ export function ProjectPage({
   const [descriptionDraft, setDescriptionDraft] = useState(project.description ?? "");
   const [descriptionError, setDescriptionError] = useState("");
   const [isSavingDescription, setIsSavingDescription] = useState(false);
+  const [changeTitle, setChangeTitle] = useState("");
+  const [changeIntent, setChangeIntent] = useState("");
+  const [changeStatus, setChangeStatus] = useState("");
+  const [isSubmittingChange, setIsSubmittingChange] = useState(false);
+  const [remoteChanges, setRemoteChanges] = useState<OpenShipRemoteChange[]>([]);
+
+  async function handleSubmitOpenShipChange() {
+    if (!onSubmitOpenShipChanges || !changeTitle.trim() || !changeIntent.trim()) return;
+    setIsSubmittingChange(true);
+    setChangeStatus("");
+    try {
+      const result = await onSubmitOpenShipChanges(changeTitle.trim(), changeIntent.trim());
+      const error = getErrorMessage(result);
+      if (error) setChangeStatus(error);
+      else if (result && typeof result === "object" && "status" in result) {
+        setChangeStatus(`Candidate ${result.status}${result.phase ? ` · ${result.phase}` : ""}`);
+        setRemoteChanges((current) => [result, ...current]);
+      }
+    } finally {
+      setIsSubmittingChange(false);
+    }
+  }
 
   async function handleSaveDescription() {
     if (!onUpdateDescription) return;
@@ -225,6 +269,76 @@ export function ProjectPage({
           </div>
         )}
       </section>
+
+      {openship && (
+        <section className="project-description-card openship-project-card" aria-labelledby="openship-project-title">
+          <div className="project-description-content">
+            <div className="home-highlight-title-row">
+              <h3 id="openship-project-title" className="thread-section-title">OpenShip</h3>
+              <span className={`project-badge${openship.legacy ? " project-badge--muted" : ""}`}>
+                {openship.legacy ? "Legacy · view only" : "1.0 verified"}
+              </span>
+            </div>
+            {openship.origin && <p><a href={openship.origin} target="_blank" rel="noreferrer">{openship.origin}</a></p>}
+            {openship.totals && <p className="status-text">{openship.totals.files} source files · {Math.round(openship.totals.bytes / 1024)} KB</p>}
+            {openship.currentDigest && <code className="openship-project-digest">{openship.currentDigest}</code>}
+            {openship.upstreamBaseDigest && openship.upstreamBaseDigest !== openship.currentDigest && (
+              <p className="status-text">Upstream base <code>{openship.upstreamBaseDigest}</code></p>
+            )}
+            {openship.files.length > 0 && (
+              <details className="openship-source-files">
+                <summary>Verified source files</summary>
+                <ul>
+                  {openship.files.map((file) => (
+                    <li key={file.path}>
+                      <code>{file.path}</code> <span>{file.file_type} · {file.encoding} · {file.size} B</span>
+                      {file.target && <span> → {file.target}</span>}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            {!openship.legacy && <p className="status-text">Manifest, Bundle, and Systems JSON exports are available through the project API.</p>}
+            {!openship.legacy && !openship.capabilities?.systems && project.threads[0] && (
+              <p><Link to={`/${project.ownerHandle}/${project.name}/thread/${project.threads[0].projectThreadId ?? project.threads[0].id}`}>Analyze source</Link> to propose architecture in a normal agent thread.</p>
+            )}
+            {!openship.legacy && Boolean(openship.capabilities?.changes) && onSubmitOpenShipChanges && (
+              <div className="openship-changes-form">
+                <h4>Submit source changes</h4>
+                <input className="form-input" value={changeTitle} onChange={(event) => setChangeTitle(event.target.value)} placeholder="Change title" />
+                <textarea className="form-textarea" value={changeIntent} onChange={(event) => setChangeIntent(event.target.value)} placeholder="What changed and why" rows={3} />
+                <button type="button" className="btn btn-secondary" disabled={isSubmittingChange || !changeTitle.trim() || !changeIntent.trim()} onClick={() => void handleSubmitOpenShipChange()}>
+                  {isSubmittingChange ? "Submitting…" : "Submit candidate"}
+                </button>
+                {onListOpenShipChanges && remoteChanges.length === 0 && (
+                  <button type="button" className="btn btn-ghost" onClick={() => void onListOpenShipChanges().then((result) => {
+                    if (Array.isArray(result)) setRemoteChanges(result);
+                  })}>Load candidate history</button>
+                )}
+                {changeStatus && <p className="status-text" role="status">{changeStatus}</p>}
+                {remoteChanges.length > 0 && (
+                  <ul className="openship-change-list">
+                    {remoteChanges.map((change, index) => (
+                      <li key={`${change.remoteChangeId ?? "unsupported"}-${index}`}>
+                        <span className="project-badge">{change.status}</span>
+                        {change.phase && <span>{change.phase}</span>}
+                        {change.candidateOrigin && <a href={change.candidateOrigin} target="_blank" rel="noreferrer">candidate</a>}
+                        {onPollOpenShipChange && change.statusUrl && (change.status === "pending" || change.status === "processing") && (
+                          <button type="button" className="btn btn-ghost" onClick={() => void onPollOpenShipChange(change).then((result) => {
+                            if (result && typeof result === "object" && "status" in result && !("error" in result)) {
+                              setRemoteChanges((current) => current.map((item) => item === change ? result : item));
+                            }
+                          })}>Refresh</button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
       <section className="thread-section">
         <h3 className="thread-section-title">Threads</h3>

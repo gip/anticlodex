@@ -1,0 +1,16 @@
+{
+  "openship": "1.0",
+  "capability": "changes",
+  "error": "policy_violation",
+  "message": "1 rule rejected this change.",
+  "base": "sha256:1d322539e651a3c2d7c51eb8b33160627395b9601bff909e599771b806d9e565",
+  "policy": "https://example.com/openship/policy.json",
+  "violations": [
+    {
+      "gate": "path",
+      "rule": "protected",
+      "path": "app/api/session/route.ts",
+      "message": "This path is protected."
+    }
+  ]
+}

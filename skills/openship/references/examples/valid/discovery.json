@@ -1,0 +1,20 @@
+{
+  "openship": "1.0",
+  "capability": "discovery",
+  "project": { "name": "Example", "description": "An example OpenShip project." },
+  "skill": "https://example.com/openship/file/skills/openship/SKILL.md",
+  "capabilities": {
+    "sources": {
+      "manifest": "https://example.com/openship/manifest.json",
+      "bundle": "https://example.com/openship/bundle.json",
+      "file": "https://example.com/openship/file/{path}",
+      "archive": "https://example.com/openship/source.tar.gz"
+    },
+    "changes": {
+      "policy": "https://example.com/openship/policy.json",
+      "submit": "https://example.com/openship/changes",
+      "status": "https://example.com/openship/changes/{changeId}"
+    }
+  }
+}
+

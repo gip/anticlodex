@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openship.dev/schemas/changes-submission.schema.json",
+  "title": "OpenShip Changes v1 submission",
+  "type": "object",
+  "required": ["openship", "capability", "base", "title", "intent", "files"],
+  "properties": {
+    "openship": { "const": "1.0" },
+    "capability": { "const": "changes" },
+    "base": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "intent": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "files": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^\\u0000]+$" },
+      "additionalProperties": {
+        "oneOf": [
+          { "type": "null" },
+          {
+            "type": "object",
+            "required": ["encoding", "content"],
+            "properties": {
+              "encoding": { "enum": ["utf-8", "base64"] },
+              "content": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    }
+  },
+  "additionalProperties": true
+}

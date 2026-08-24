@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useAuth0 } from "@auth0/auth0-react";
+import { useAuth as useWorkOSAuth } from "@workos-inc/authkit-react";
 import {
   BrowserRouter,
   Link,
@@ -605,14 +605,16 @@ async function readError(res: Response, fallback: string) {
 }
 
 function useApi() {
-  const { getAccessTokenSilently, isAuthenticated, isLoading } = useAuth0();
+  const { getAccessToken, user, isLoading } = useWorkOSAuth();
+  const isAuthenticated = user !== null;
 
   const isRecoverableAuthError = useCallback((error: unknown) => {
     if (!error || typeof error !== "object") return false;
+    if (error instanceof Error && error.name === "LoginRequiredError") return true;
     const code = "error" in error && typeof (error as { error?: unknown }).error === "string"
       ? (error as { error: string }).error
       : null;
-    return code === "login_required" || code === "consent_required" || code === "missing_refresh_token";
+    return code === "login_required";
   }, []);
 
   const apiFetch = useCallback(
@@ -627,7 +629,7 @@ function useApi() {
         authMode !== "none" && (authMode === "required" || (isAuthenticated && !isLoading));
       if (shouldTryToken) {
         try {
-          token = await getAccessTokenSilently();
+          token = await getAccessToken();
         } catch (error) {
           if (authMode === "required" || !isRecoverableAuthError(error)) {
             throw error;
@@ -645,7 +647,7 @@ function useApi() {
         headers,
       });
     },
-    [getAccessTokenSilently, isAuthenticated, isLoading, isRecoverableAuthError],
+    [getAccessToken, isAuthenticated, isLoading, isRecoverableAuthError],
   );
 
   return apiFetch;
@@ -657,6 +659,16 @@ function NavigateSync() {
     setNavigate((to) => navigate(to));
   }, [navigate]);
   return null;
+}
+
+function LoginRoute() {
+  const { signIn } = useWorkOSAuth();
+
+  useEffect(() => {
+    void signIn();
+  }, [signIn]);
+
+  return <p className="status-text">Redirecting to sign in…</p>;
 }
 
 function NotFoundRoute() {
@@ -1366,7 +1378,8 @@ function ThreadRoute({ onProjectMutated }: { onProjectMutated?: () => void }) {
     project: string;
     threadId: string;
   }>();
-  const { isAuthenticated } = useAuth0();
+  const { user: workOSUser } = useWorkOSAuth();
+  const isAuthenticated = workOSUser !== null;
   const navigate = useNavigate();
   const apiFetch = useApi();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -2226,6 +2239,7 @@ function AppShell({
         <div className="app-content">
           <Routes>
             <Route path="/" element={<HomePage projects={projects} setProjects={setProjects} />} />
+            <Route path="/login" element={<LoginRoute />} />
             <Route path="/:handle/:project" element={<ProjectRoute onProjectMutated={refreshProjects} />} />
             <Route path="/settings" element={<AccountSettingsRoute />} />
             <Route path="/:handle/:project/settings" element={<SettingsRoute onProjectMutated={refreshProjects} />} />
@@ -2248,7 +2262,8 @@ function AppShell({
 }
 
 export function App() {
-  const { isAuthenticated, isLoading, loginWithRedirect, logout } = useAuth0();
+  const { user: workOSUser, isLoading, signIn, signOut } = useWorkOSAuth();
+  const isAuthenticated = workOSUser !== null;
   const apiFetch = useApi();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -2293,8 +2308,8 @@ export function App() {
         isAuthenticated,
         isLoading,
         user,
-        login: () => loginWithRedirect(),
-        logout: () => logout({ logoutParams: { returnTo: window.location.origin } }),
+        login: () => void signIn(),
+        logout: () => signOut({ returnTo: window.location.origin }),
       }}
     >
       <BrowserRouter>

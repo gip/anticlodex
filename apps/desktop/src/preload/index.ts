@@ -1,19 +1,21 @@
 import { contextBridge, ipcRenderer } from "electron";
+import { exposeAuthKit } from "@workos/authkit-electron/preload";
+
+exposeAuthKit();
 
 contextBridge.exposeInMainWorld("electronAPI", {
   platform: process.platform,
   auth: {
-    getState: () => ipcRenderer.invoke("auth:get-state") as Promise<{ isAuthenticated: boolean }>,
-    getValidAccessToken: (options?: { forceRefresh?: boolean }) =>
-      ipcRenderer.invoke("auth:get-valid-token", options) as Promise<string | null>,
-    login: () => ipcRenderer.send("auth:login"),
-    logout: () => ipcRenderer.send("auth:logout"),
-    onStateChanged: (callback: (state: { isAuthenticated: boolean }) => void) => {
-      const handler = (_event: Electron.IpcRendererEvent, state: { isAuthenticated: boolean }) =>
-        callback(state);
-      ipcRenderer.on("auth:state-changed", handler);
-      return () => ipcRenderer.removeListener("auth:state-changed", handler);
+    onAccessTokenRequested: (callback: (requestId: string) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, requestId: string) =>
+        callback(requestId);
+      ipcRenderer.on("auth:request-access-token", listener);
+      return () => ipcRenderer.removeListener("auth:request-access-token", listener);
     },
+    respondWithAccessToken: (
+      requestId: string,
+      result: { token?: string; error?: string },
+    ) => ipcRenderer.send("auth:access-token-response", requestId, result),
   },
   assistant: {
     run: (payload: {

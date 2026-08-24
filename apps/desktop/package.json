@@ -10,6 +10,8 @@
     "preview": "electron-vite preview"
   },
   "dependencies": {
+    "@workos/authkit-electron": "^0.1.2",
+    "@workos-inc/node": "^10.10.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-router-dom": "^7.13.0",

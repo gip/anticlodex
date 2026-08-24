@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useAuth as useWorkOSAuth } from "@workos/authkit-electron/react";
 import {
   AuthContext,
   useAuth,
@@ -289,14 +290,6 @@ function toEnvelopePayload<T>(raw: {
   };
 }
 
-interface ElectronAuthAPI {
-  getState: () => Promise<{ isAuthenticated: boolean }>;
-  getValidAccessToken: (options?: { forceRefresh?: boolean }) => Promise<string | null>;
-  login: () => void;
-  logout: () => void;
-  onStateChanged: (cb: (state: { isAuthenticated: boolean }) => void) => () => void;
-}
-
 interface AssistantRunResultResponse {
   error?: string;
   runId: string;
@@ -342,11 +335,19 @@ interface ElectronAssistantAPI {
   }) => Promise<AssistantRunResultResponse>;
 }
 
+interface ElectronAuthBrokerAPI {
+  onAccessTokenRequested: (callback: (requestId: string) => void) => () => void;
+  respondWithAccessToken: (
+    requestId: string,
+    result: { token?: string; error?: string },
+  ) => void;
+}
+
 declare global {
   interface Window {
     electronAPI: {
       platform: string;
-      auth: ElectronAuthAPI;
+      auth: ElectronAuthBrokerAPI;
       assistant?: ElectronAssistantAPI;
     };
   }
@@ -653,35 +654,35 @@ async function readError(res: Response, fallback: string) {
   return fallback;
 }
 
-async function desktopApiFetch(path: string, init?: RequestInit): Promise<Response> {
-  const request = async (forceRefresh = false) => {
-    const token = await window.electronAPI.auth.getValidAccessToken({ forceRefresh });
-    if (!token) throw new Error("Not authenticated");
+async function desktopApiFetch(
+  path: string,
+  init: RequestInit | undefined,
+  getAccessToken: () => Promise<string | null>,
+  signOut: () => Promise<unknown>,
+): Promise<Response> {
+  const token = await getAccessToken();
+  if (!token) throw new Error("Not authenticated");
 
-    const headers = new Headers(init?.headers ?? {});
-    headers.set("Authorization", `Bearer ${token}`);
+  const headers = new Headers(init?.headers ?? {});
+  headers.set("Authorization", `Bearer ${token}`);
 
-    return fetch(`${API_URL}${path}`, {
-      ...init,
-      headers,
-    });
-  };
-
-  let response = await request();
+  const response = await fetch(`${API_URL}${path}`, {
+    ...init,
+    headers,
+  });
   if (response.status === 401) {
-    response = await request(true);
-    if (response.status === 401) {
-      window.electronAPI.auth.logout();
-    }
+    await signOut();
   }
 
   return response;
 }
 
 function useApi() {
+  const { getAccessToken, signOut } = useWorkOSAuth();
   const apiFetch = useCallback(
-    async (path: string, init?: RequestInit) => desktopApiFetch(path, init),
-    [],
+    async (path: string, init?: RequestInit) =>
+      desktopApiFetch(path, init, getAccessToken, signOut),
+    [getAccessToken, signOut],
   );
 
   return apiFetch;
@@ -2300,8 +2301,9 @@ function AppShell({
 }
 
 export function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  const { user: workOSUser, isLoading, signIn, signOut, getAccessToken } = useWorkOSAuth();
+  const isAuthenticated = workOSUser !== null;
+  const apiFetch = useApi();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsKey, setProjectsKey] = useState(0);
@@ -2309,20 +2311,21 @@ export function App() {
   const refreshProjects = useCallback(() => setProjectsKey((k) => k + 1), []);
 
   useEffect(() => {
-    const { auth } = window.electronAPI;
-
-    auth.getState().then((state) => {
-      setIsAuthenticated(state.isAuthenticated);
-      setIsLoading(false);
+    return window.electronAPI.auth.onAccessTokenRequested((requestId) => {
+      void getAccessToken()
+        .then((token) => {
+          window.electronAPI.auth.respondWithAccessToken(
+            requestId,
+            token ? { token } : { error: "Not authenticated" },
+          );
+        })
+        .catch((error: unknown) => {
+          window.electronAPI.auth.respondWithAccessToken(requestId, {
+            error: error instanceof Error ? error.message : "Authentication refresh failed",
+          });
+        });
     });
-
-    const unsubscribe = auth.onStateChanged((state) => {
-      setIsAuthenticated(state.isAuthenticated);
-      setIsLoading(false);
-    });
-
-    return unsubscribe;
-  }, []);
+  }, [getAccessToken]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -2331,7 +2334,7 @@ export function App() {
       return;
     }
 
-    Promise.all([desktopApiFetch("/me"), desktopApiFetch("/projects")])
+    Promise.all([apiFetch("/me"), apiFetch("/projects")])
       .then(async ([meRes, projRes]) => {
         if (meRes.ok) {
           const me = await meRes.json();
@@ -2346,7 +2349,7 @@ export function App() {
       .catch((err) => {
         console.error("API fetch failed:", err);
       });
-  }, [isAuthenticated, projectsKey]);
+  }, [apiFetch, isAuthenticated, projectsKey]);
 
   return (
     <AuthContext.Provider
@@ -2354,8 +2357,8 @@ export function App() {
         isAuthenticated,
         isLoading,
         user,
-        login: () => window.electronAPI.auth.login(),
-        logout: () => window.electronAPI.auth.logout(),
+        login: () => void signIn(),
+        logout: () => void signOut(),
       }}
     >
       <AppShell projects={projects} setProjects={setProjects} isAuthenticated={isAuthenticated} refreshProjects={refreshProjects} />

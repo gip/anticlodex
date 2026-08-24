@@ -1,12 +1,55 @@
-import { app, BrowserWindow, ipcMain, nativeImage } from "electron";
+import { app, BrowserWindow, ipcMain, nativeImage, type WebContents } from "electron";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { startAssistantRunLocal } from "./agent.js";
-import { getAuthState, getValidAccessToken, login, logout, notifyRenderer, onAuthStateChanged } from "./auth.js";
+import { authKit } from "./auth.js";
 
 let mainWindow: BrowserWindow | null = null;
 let appIcon: Electron.NativeImage | null = null;
 const isClaudeAgentEnabled = process.env.ACX_ENABLE_CLAUDE_AGENT === "1";
+const pendingTokenRequests = new Map<
+  string,
+  {
+    senderId: number;
+    resolve: (token: string) => void;
+    reject: (error: Error) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }
+>();
+
+function requestAccessToken(sender: WebContents): Promise<string> {
+  if (sender.isDestroyed()) {
+    return Promise.reject(new Error("Authentication window is unavailable"));
+  }
+
+  const requestId = randomUUID();
+  return new Promise<string>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingTokenRequests.delete(requestId);
+      reject(new Error("Timed out while refreshing authentication"));
+    }, 15_000);
+
+    pendingTokenRequests.set(requestId, { senderId: sender.id, resolve, reject, timeout });
+    sender.send("auth:request-access-token", requestId);
+  });
+}
+
+ipcMain.on(
+  "auth:access-token-response",
+  (event, requestId: string, result: { token?: string; error?: string }) => {
+    const pending = pendingTokenRequests.get(requestId);
+    if (!pending || pending.senderId !== event.sender.id) return;
+
+    clearTimeout(pending.timeout);
+    pendingTokenRequests.delete(requestId);
+    if (typeof result.token === "string" && result.token.trim()) {
+      pending.resolve(result.token);
+      return;
+    }
+    pending.reject(new Error(result.error || "Not authenticated"));
+  },
+);
 
 function resolveIcon(): string | null {
   const candidates = [
@@ -64,9 +107,6 @@ function createWindow() {
   });
 }
 
-// Auth IPC handlers
-ipcMain.handle("auth:get-state", () => getAuthState());
-ipcMain.handle("auth:get-valid-token", (_event, options?: { forceRefresh?: boolean }) => getValidAccessToken(options));
 ipcMain.handle("assistant:run", async (_event, payload: {
   handle: string;
   projectName: string;
@@ -77,26 +117,22 @@ ipcMain.handle("assistant:run", async (_event, payload: {
   if (!isClaudeAgentEnabled) {
     return { error: "Desktop agent processing is disabled. Set ACX_ENABLE_CLAUDE_AGENT=1." };
   }
-  return startAssistantRunLocal(payload);
-});
-
-ipcMain.on("auth:login", async () => {
-  const success = await login();
-  if (success && mainWindow) {
-    mainWindow.focus();
-  }
-});
-
-ipcMain.on("auth:logout", async () => {
-  await logout();
+  return startAssistantRunLocal(payload, () => requestAccessToken(_event.sender));
 });
 
 app.whenReady().then(() => {
+  authKit.registerProtocol();
   createWindow();
-  onAuthStateChanged(() => {
-    if (mainWindow) notifyRenderer(mainWindow);
-  });
   console.info("[desktop] agent task processing enabled", { enabled: isClaudeAgentEnabled });
+});
+
+app.on("will-quit", () => {
+  for (const pending of pendingTokenRequests.values()) {
+    clearTimeout(pending.timeout);
+    pending.reject(new Error("Application is shutting down"));
+  }
+  pendingTokenRequests.clear();
+  authKit.cleanup();
 });
 
 app.on("window-all-closed", () => {

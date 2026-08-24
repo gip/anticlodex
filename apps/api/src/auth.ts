@@ -4,17 +4,17 @@ import { colors, uniqueNamesGenerator, animals } from "unique-names-generator";
 import { randomUUID } from "node:crypto";
 import { query } from "./db.js";
 
-interface Auth0Payload extends JWTPayload {
+interface WorkOSPayload extends JWTPayload {
   sub: string;
+  client_id?: string;
   scope?: string;
-  orgId?: string;
   org_id?: string;
-  organization?: string;
+  organization_id?: string;
 }
 
 interface UserRow {
   id: string;
-  auth0_id: string;
+  identity_subject: string;
   email: string | null;
   name: string | null;
   picture: string | null;
@@ -26,7 +26,7 @@ interface UserRow {
 
 export interface AuthUser {
   id: string;
-  auth0Id: string;
+  identitySubject: string;
   email: string | null;
   name: string | null;
   picture: string | null;
@@ -60,13 +60,22 @@ function withProblem(
   });
 }
 
-function extractOrgId(payload: Auth0Payload): string | null {
+interface WorkOSUserProfile {
+  id: string;
+  email: string;
+  email_verified: boolean;
+  first_name: string | null;
+  last_name: string | null;
+  name?: string | null;
+  profile_picture_url: string | null;
+  external_id?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+function extractOrgId(payload: WorkOSPayload): string | null {
   const candidates: Array<unknown> = [
-    payload.orgId,
     payload.org_id,
-    payload.organization,
-    (payload as { [key: string]: unknown })["https://anticlodex.com/org_id"],
-    (payload as { [key: string]: unknown })["https://anticlodex.com/organization"],
+    payload.organization_id,
   ];
 
   const first = candidates.find((value) => typeof value === "string");
@@ -79,7 +88,7 @@ function extractOrgId(payload: Auth0Payload): string | null {
 function mapRow(row: UserRow, scope: string | null, orgId: string | null): AuthUser {
   return {
     id: row.id,
-    auth0Id: row.auth0_id,
+    identitySubject: row.identity_subject,
     email: row.email,
     name: row.name,
     picture: row.picture,
@@ -102,44 +111,94 @@ function toScope(raw: string | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function deriveOrgId(orgId: string | null, fallbackUserOrg: string | null): string {
-  return orgId ?? fallbackUserOrg ?? randomUUID();
-}
-
 async function fetchUserProfile(
-  domain: string,
-  accessToken: string,
-): Promise<{ email?: string; name?: string; picture?: string; nickname?: string }> {
-  const res = await fetch(`https://${domain}/userinfo`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  if (!res.ok) throw new Error(`Failed to fetch userinfo: ${res.status}`);
-  return res.json() as Promise<{ email?: string; name?: string; picture?: string; nickname?: string }>;
+  apiHostname: string,
+  apiKey: string,
+  userId: string,
+): Promise<WorkOSUserProfile> {
+  const res = await fetch(
+    `https://${apiHostname}/user_management/users/${encodeURIComponent(userId)}`,
+    {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    },
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to fetch WorkOS user profile: ${res.status}`);
+  }
+  return res.json() as Promise<WorkOSUserProfile>;
 }
 
-async function findOrCreateUser(domain: string, payload: Auth0Payload, token: string): Promise<AuthUser> {
+function profileName(profile: WorkOSUserProfile): string | null {
+  if (profile.name?.trim()) return profile.name.trim();
+  const name = [profile.first_name, profile.last_name].filter(Boolean).join(" ").trim();
+  return name || null;
+}
+
+function profileGithubHandle(profile: WorkOSUserProfile): string | null {
+  const candidate = profile.metadata?.github_handle ?? profile.metadata?.githubHandle;
+  if (typeof candidate !== "string") return null;
+  const normalized = candidate.trim();
+  return normalized || null;
+}
+
+async function findOrCreateUser(
+  apiHostname: string,
+  apiKey: string,
+  payload: WorkOSPayload,
+): Promise<AuthUser> {
   const orgId = extractOrgId(payload);
   const requestedScope = toScope(payload.scope);
 
-  const existing = await query<UserRow>("SELECT * FROM users WHERE auth0_id = $1", [payload.sub]);
+  const existing = await query<UserRow>("SELECT * FROM users WHERE identity_subject = $1", [
+    payload.sub,
+  ]);
   if (existing.rows.length > 0) {
-    return mapRow(existing.rows[0], requestedScope, orgId ?? null);
+    return mapRow(existing.rows[0], requestedScope, orgId);
   }
 
-  const profile = await fetchUserProfile(domain, token);
+  const profile = await fetchUserProfile(apiHostname, apiKey, payload.sub);
+  const name = profileName(profile);
+  const githubHandle = profileGithubHandle(profile);
 
-  const isGitHub = payload.sub.startsWith("github|");
-  const githubHandle = isGitHub ? (profile.nickname ?? null) : null;
+  // WorkOS's Auth0 migration stores the former Auth0 subject in external_id.
+  // Rebind that row to the WorkOS subject so internal user/project IDs survive.
+  if (profile.external_id) {
+    const migrated = await query<UserRow>(
+      `UPDATE users
+       SET identity_subject = $1,
+           email = $2,
+           name = $3,
+           picture = $4,
+           github_handle = COALESCE($5, github_handle),
+           updated_at = now()
+       WHERE identity_subject = $6
+         AND NOT EXISTS (
+           SELECT 1 FROM users existing_subject WHERE existing_subject.identity_subject = $1
+         )
+       RETURNING *`,
+      [
+        payload.sub,
+        profile.email,
+        name,
+        profile.profile_picture_url,
+        githubHandle,
+        profile.external_id,
+      ],
+    );
+    if (migrated.rows.length > 0) {
+      return mapRow(migrated.rows[0], requestedScope, orgId);
+    }
+  }
 
   const maxAttempts = 3;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const handle = isGitHub && profile.nickname ? profile.nickname : generateHandle();
+    const handle = attempt === 0 && githubHandle ? githubHandle : generateHandle();
 
     try {
       const result = await query<UserRow>(
-        `INSERT INTO users (id, auth0_id, email, name, picture, handle, github_handle, updated_at)
+        `INSERT INTO users (id, identity_subject, email, name, picture, handle, github_handle, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, now())
-         ON CONFLICT (auth0_id) DO UPDATE SET
+         ON CONFLICT (identity_subject) DO UPDATE SET
            email = EXCLUDED.email,
            name = EXCLUDED.name,
            picture = EXCLUDED.picture,
@@ -149,15 +208,15 @@ async function findOrCreateUser(domain: string, payload: Auth0Payload, token: st
         [
           randomUUID(),
           payload.sub,
-          profile.email ?? null,
-          profile.name ?? null,
-          profile.picture ?? null,
+          profile.email,
+          name,
+          profile.profile_picture_url,
           handle,
           githubHandle,
         ],
       );
 
-      return mapRow(result.rows[0], requestedScope, orgId ?? null);
+      return mapRow(result.rows[0], requestedScope, orgId);
     } catch (err: unknown) {
       const isHandleConflict =
         err instanceof Error &&
@@ -173,17 +232,22 @@ async function findOrCreateUser(domain: string, payload: Auth0Payload, token: st
   throw new Error("Failed to create user after handle collision retries");
 }
 
-const AUTH0_DOMAIN = process.env.AUTH0_DOMAIN;
-const AUTH0_AUDIENCE = process.env.AUTH0_AUDIENCE;
+const WORKOS_CLIENT_ID = process.env.WORKOS_CLIENT_ID;
+const WORKOS_API_KEY = process.env.WORKOS_API_KEY;
+const WORKOS_API_HOSTNAME = (process.env.WORKOS_API_HOSTNAME ?? "api.workos.com")
+  .trim()
+  .replace(/^https?:\/\//, "")
+  .replace(/\/+$/, "");
 
-if (!AUTH0_DOMAIN || !AUTH0_AUDIENCE) {
-  throw new Error("AUTH0_DOMAIN and AUTH0_AUDIENCE must be set");
+if (!WORKOS_CLIENT_ID || !WORKOS_API_KEY) {
+  throw new Error("WORKOS_CLIENT_ID and WORKOS_API_KEY must be set");
 }
 
-const domain: string = AUTH0_DOMAIN;
-const audience: string = AUTH0_AUDIENCE;
-const issuer = `https://${domain}/`;
-const jwks = createRemoteJWKSet(new URL(`${issuer}.well-known/jwks.json`));
+const clientId: string = WORKOS_CLIENT_ID;
+const apiKey: string = WORKOS_API_KEY;
+const apiHostname: string = WORKOS_API_HOSTNAME;
+const issuer = `https://${apiHostname}`;
+const jwks = createRemoteJWKSet(new URL(`https://${apiHostname}/sso/jwks/${clientId}`));
 
 async function authenticateRequest(
   req: FastifyRequest,
@@ -204,10 +268,16 @@ async function authenticateRequest(
 
   const token = header.slice(7);
 
-  let auth0Payload: Auth0Payload;
+  let workOSPayload: WorkOSPayload;
   try {
-    const { payload } = await jwtVerify(token, jwks, { issuer, audience });
-    auth0Payload = payload as Auth0Payload;
+    const { payload } = await jwtVerify(token, jwks, { issuer, algorithms: ["RS256"] });
+    if (typeof payload.sub !== "string" || !payload.sub.startsWith("user_")) {
+      throw new Error("WorkOS access token has an invalid subject");
+    }
+    if (typeof payload.client_id === "string" && payload.client_id !== clientId) {
+      throw new Error("WorkOS access token belongs to a different application");
+    }
+    workOSPayload = payload as WorkOSPayload;
   } catch (err) {
     req.log.warn({ err }, "JWT verification failed");
     withProblem(reply, 401, "Unauthorized", "Invalid bearer token", req.url);
@@ -215,7 +285,7 @@ async function authenticateRequest(
   }
 
   try {
-    req.auth = await findOrCreateUser(domain, auth0Payload, token);
+    req.auth = await findOrCreateUser(apiHostname, apiKey, workOSPayload);
     return req.auth;
   } catch (err) {
     req.log.error({ err }, "User lookup/creation failed");

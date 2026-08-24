@@ -10,6 +10,11 @@ export default defineConfig({
   },
   preload: {
     build: {
+      // The preload output must remain CJS, while AuthKit Electron is ESM-only.
+      // Bundle its preload bridge so the generated CJS never require()s it.
+      externalizeDeps: {
+        exclude: ["@workos/authkit-electron"],
+      },
       outDir: "out/preload",
       lib: {
         entry: "src/preload/index.ts",

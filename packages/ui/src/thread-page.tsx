@@ -12,7 +12,7 @@ import {
   Send,
   X,
 } from "lucide-react";
-import ELK, { type ElkExtendedEdge, type ElkNode } from "elkjs/lib/elk.bundled.js";
+import type { ElkExtendedEdge, ElkNode } from "elkjs/lib/elk-api.js";
 import ReactFlow, {
   Background,
   ControlButton,
@@ -105,7 +105,9 @@ export interface MatrixDocument {
   kind: DocKind;
   title: string;
   language: string;
-  text: string;
+  // Absent on the thread read: document bodies are the largest rows in the
+  // schema and most are never opened, so they are fetched per hash on demand.
+  text?: string;
   sourceType?: DocSourceType;
   sourceUrl?: string | null;
   sourceExternalId?: string | null;
@@ -147,7 +149,19 @@ const ASSISTANT_MODELS: AssistantModelOption[] = [
 const DEFAULT_ASSISTANT_MODEL: AssistantModel = "claude-opus-4-6";
 const MODEL_STORAGE_KEY_PREFIX = "acx-thread-agent-model";
 const MODEL_STORAGE_KEY_GLOBAL = "acx-thread-agent-model-default";
-const TOPOLOGY_ELK = new ELK();
+// elk.bundled.js is ~1.6 MB and is only needed when the user runs auto-layout,
+// so it is loaded on demand and memoized rather than pulled into the entry chunk.
+let topologyElkPromise: Promise<{ layout(graph: ElkNode): Promise<ElkNode> }> | null = null;
+
+function getTopologyElk() {
+  topologyElkPromise ??= import("elkjs/lib/elk.bundled.js")
+    .then((mod) => new mod.default())
+    .catch((error) => {
+      topologyElkPromise = null;
+      throw error;
+    });
+  return topologyElkPromise;
+}
 const TOPOLOGY_ELK_LAYOUT_OPTIONS = {
   "elk.algorithm": "layered",
   "elk.direction": "RIGHT",
@@ -241,6 +255,9 @@ function getRunSummary(response: AssistantRunResponse): { status: AssistantRunSu
 
 export interface ThreadDetail {
   id: string;
+  // Returned by GET /threads/:threadId so a client that routed by
+  // handle/projectName does not have to resolve the project id separately.
+  projectId?: string;
   title: string;
   description: string | null;
   status: ThreadStatus;
@@ -369,6 +386,8 @@ interface ThreadPageProps {
   onRemoveMatrixDoc?: (
     payload: MatrixRefInput,
   ) => Promise<MutationResult<MatrixRefMutationResponse>>;
+  onLoadDocumentText?: (documentHash: string) => Promise<string | null>;
+  onSearchDocumentText?: (query: string) => Promise<string[] | null>;
   onCreateMatrixDocument?: (payload: MatrixDocumentCreateInput) => Promise<MutationResult<MatrixDocumentCreateResponse>>;
   onReplaceMatrixDocument?: (documentHash: string, payload: MatrixDocumentReplaceInput) => Promise<MutationResult<MatrixDocumentReplaceResponse>>;
   onSendChatMessage?: (payload: { content: string }) => Promise<MutationResult<{ messages: ChatMessage[] }>>;
@@ -406,6 +425,7 @@ function chunkIntoPairs<T>(items: T[]): T[][] {
 const MATRIX_DOC_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const normalizeConcernName = (value: string) => value.trim().toLowerCase();
 const DEFAULT_DOCUMENT_LANGUAGE = "en";
+const DOCUMENT_SEARCH_DEBOUNCE_MS = 200;
 const isHiddenMatrixConcern = (name: string) => name === SYSTEM_PROMPT_CONCERN;
 const normalizeMatrixConcerns = (concerns: { name: string; position: number }[]) =>
   concerns.filter((concern) => !isHiddenMatrixConcern(concern.name));
@@ -1642,6 +1662,8 @@ export function ThreadPage({
   onSaveTopologyLayout,
   onAddMatrixDoc,
   onRemoveMatrixDoc,
+  onLoadDocumentText,
+  onSearchDocumentText,
   onCreateMatrixDocument,
   onReplaceMatrixDocument,
   onSendChatMessage,
@@ -1671,8 +1693,11 @@ export function ThreadPage({
   const [matrixError, setMatrixError] = useState("");
   const [activeMatrixMutation, setActiveMatrixMutation] = useState("");
   const [chatInput, setChatInput] = useState("");
-  const [chatError, setChatError] = useState("");
   const [isSendingChat, setIsSendingChat] = useState(false);
+  // Sending a message and running the assistant on it are two steps that fail
+  // separately: the message can be saved and the run still not start. Keeping
+  // the errors apart lets the panel say which half went wrong.
+  const [chatError, setChatError] = useState("");
   const [assistantError, setAssistantError] = useState("");
   const [assistantSummaryStatus, setAssistantSummaryStatus] = useState<AssistantRunSummaryStatus | null>(null);
   const [selectedAgentModel, setSelectedAgentModel] = useState<AssistantModel>(() =>
@@ -1691,7 +1716,6 @@ export function ThreadPage({
   const [cloneError, setCloneError] = useState("");
   const [cloneTitle, setCloneTitle] = useState(detail.thread.title);
   const [cloneDescription, setCloneDescription] = useState(detail.thread.description ?? "");
-  const [pendingPlanActionId, setPendingPlanActionId] = useState<string | null>(null);
   const [showNetworkEdges, setShowNetworkEdges] = useState(true);
   const [showDependencyEdges, setShowDependencyEdges] = useState(true);
   const [visibleOwnerships, setVisibleOwnerships] = useState<Set<TopologyOwnership>>(
@@ -1710,6 +1734,12 @@ export function ThreadPage({
     selectedConcerns: string[];
   }) | null>(null);
   const [docPickerSearch, setDocPickerSearch] = useState("");
+  // Document bodies keyed by content hash. Content-addressed, so an entry is
+  // valid forever and the cache never needs invalidating.
+  const [documentTexts, setDocumentTexts] = useState<Record<string, string>>({});
+  const documentTextRequestsRef = useRef<Map<string, Promise<string | null>>>(new Map());
+  const hydratedDocModalHashRef = useRef<string | null>(null);
+  const [docPickerTextMatches, setDocPickerTextMatches] = useState<Set<string> | null>(null);
   const [docPickerKindFilter, setDocPickerKindFilter] = useState<"All" | DocKind>("All");
   const [docModalMarkdownTab, setDocModalMarkdownTab] = useState<"write" | "preview">("write");
   const [docModalName, setDocModalName] = useState("");
@@ -2011,11 +2041,60 @@ export function ThreadPage({
   );
 
   // Shared modal entrypoint used by matrix-cell and topology-node add/edit actions.
+  const loadDocumentText = useCallback(
+    (documentHash: string): Promise<string | null> => {
+      if (!onLoadDocumentText) return Promise.resolve(null);
+      const inFlight = documentTextRequestsRef.current.get(documentHash);
+      if (inFlight) return inFlight;
+
+      const request = onLoadDocumentText(documentHash)
+        .then((text) => {
+          if (typeof text === "string") {
+            setDocumentTexts((previous) => ({ ...previous, [documentHash]: text }));
+          }
+          return text;
+        })
+        .catch(() => null)
+        .finally(() => {
+          documentTextRequestsRef.current.delete(documentHash);
+        });
+
+      documentTextRequestsRef.current.set(documentHash, request);
+      return request;
+    },
+    [onLoadDocumentText],
+  );
+
+  // The picker used to search document bodies client-side, which only worked
+  // because every body was shipped with the thread. The bodies now stay on the
+  // server, so the body half of the search runs there; titles and hashes are
+  // still matched locally, so typing narrows the list before the request lands.
+  useEffect(() => {
+    const searchQuery = docPickerSearch.trim();
+    if (!onSearchDocumentText || !searchQuery) {
+      setDocPickerTextMatches(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void onSearchDocumentText(searchQuery).then((hashes) => {
+        if (cancelled) return;
+        setDocPickerTextMatches(hashes ? new Set(hashes) : null);
+      });
+    }, DOCUMENT_SEARCH_DEBOUNCE_MS);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [docPickerSearch, onSearchDocumentText]);
+
   const openDocumentPicker = useCallback(
     (next: MatrixDocumentModal, mode: MatrixDocumentModalMode, editHash: string | null = null) => {
       const initialConcern = next.concern ?? "";
       const initialConcerns = next.concerns.length > 0 ? next.concerns : initialConcern ? [initialConcern] : [];
-      const resolvedMode: MatrixDocumentModalMode = next.refType === "Prompt" && Boolean(editHash)
+      const resolvedMode: MatrixDocumentModalMode = next.refType === "Prompt" && editHash
         ? "edit"
         : mode;
       setDocumentModal({
@@ -2041,8 +2120,11 @@ export function ThreadPage({
         setDocModalSourceUrl("");
       } else if (resolvedMode === "edit") {
         const existingDocument = detail.matrix.documents.find((doc) => doc.hash === editHash);
-        if (existingDocument) {
-          const parsed = parseDocumentText(existingDocument.text);
+        if (existingDocument && editHash) {
+          // Metadata is already here; the body may not be. Fill in what is known
+          // now and let the hydration effect below fill the rest when it lands.
+          const existingText = existingDocument.text ?? documentTexts[editHash];
+          const parsed = parseDocumentText(existingText ?? "");
           const existingName = parsed.name && isValidDocumentName(parsed.name) ? parsed.name : "";
           setDocModalName(existingName || deriveDocumentName(existingDocument.title));
           setDocModalTitle(existingDocument.title);
@@ -2051,6 +2133,7 @@ export function ThreadPage({
           setDocModalBody(parsed.body);
           setDocModalSourceType(existingDocument.sourceType ?? "local");
           setDocModalSourceUrl(existingDocument.sourceUrl ?? "");
+          if (typeof existingText !== "string") void loadDocumentText(editHash);
           return;
         }
 
@@ -2102,8 +2185,38 @@ export function ThreadPage({
         setDocModalSourceUrl("");
       }
       },
-    [detail.matrix.documents, detail.systemPrompt, detail.systemPromptTitle, detail.systemPrompts],
+    [detail.matrix.documents, detail.systemPrompt, detail.systemPromptTitle, detail.systemPrompts, documentTexts, loadDocumentText],
   );
+
+  // True while an edit modal is open for a document whose body has not arrived.
+  // The text-derived inputs stay disabled until it does, so the hydration effect
+  // below can never overwrite something the user typed into a half-loaded form.
+  const isEditingDocumentTextPending = Boolean(
+    documentModal
+    && documentModal.mode === "edit"
+    && documentModal.refType !== "Prompt"
+    && docModalEditHash
+    && typeof documentTexts[docModalEditHash] !== "string"
+    && detail.matrix.documents.some((doc) => doc.hash === docModalEditHash && typeof doc.text !== "string"),
+  );
+
+  // Populate the text-derived fields once per hash, when the body lands.
+  useEffect(() => {
+    if (!documentModal || documentModal.mode !== "edit" || !docModalEditHash) {
+      hydratedDocModalHashRef.current = null;
+      return;
+    }
+    if (hydratedDocModalHashRef.current === docModalEditHash) return;
+    const text = documentTexts[docModalEditHash];
+    if (typeof text !== "string") return;
+
+    hydratedDocModalHashRef.current = docModalEditHash;
+    const parsed = parseDocumentText(text);
+    const parsedName = parsed.name && isValidDocumentName(parsed.name) ? parsed.name : "";
+    setDocModalName((current) => current || parsedName);
+    setDocModalDescription(parsed.description);
+    setDocModalBody(parsed.body);
+  }, [documentModal, docModalEditHash, documentTexts]);
 
   const openMatrixCellDocumentPicker = useCallback(
     (nodeId: string, concern: string, refType: DocKind) => {
@@ -2315,7 +2428,8 @@ export function ThreadPage({
 
     try {
       const elkGraph = buildElkGraph(nodesForLayout, detail.topology.edges, flowLayoutModel);
-      const laidOutGraph = await TOPOLOGY_ELK.layout(elkGraph);
+      const elk = await getTopologyElk();
+      const laidOutGraph = await elk.layout(elkGraph);
       const appliedLayout = applyElkPositionsToFlowNodes(laidOutGraph, nodesForLayout);
       if (appliedLayout.positions.length === 0) {
         throw new Error("Auto layout did not return any node positions.");
@@ -2529,8 +2643,16 @@ export function ThreadPage({
       };
     }
 
-    return detail.matrix.documents.find((doc) => doc.hash === docModalEditHash && doc.kind === documentModal.refType) ?? null;
-  }, [documentModal, docModalEditHash, detail.matrix.documents, detail.systemPrompts]);
+    const document = detail.matrix.documents.find(
+      (doc) => doc.hash === docModalEditHash && doc.kind === documentModal.refType,
+    );
+    if (!document) return null;
+    // Fold in the on-demand body so every consumer below still sees a document
+    // with `text`. Null until it arrives, which keeps the modal out of the
+    // pristine check and blocks a save against a body nobody has read yet.
+    const text = document.text ?? documentTexts[docModalEditHash];
+    return typeof text === "string" ? { ...document, text } : null;
+  }, [documentModal, docModalEditHash, detail.matrix.documents, detail.systemPrompts, documentTexts]);
 
   const isEditDocumentModalPristine = useMemo(() => {
     const isPromptEditMode = documentModal?.refType === "Prompt" && Boolean(docModalEditHash);
@@ -2589,10 +2711,10 @@ export function ThreadPage({
       return (
         doc.title.toLowerCase().includes(query) ||
         doc.hash.toLowerCase().includes(query) ||
-        doc.text.toLowerCase().includes(query)
+        docPickerTextMatches?.has(doc.hash) === true
       );
     });
-  }, [selectedConcernsForModal, detail.matrix.cells, detail.matrix.documents, docPickerKindFilter, docPickerSearch, documentModal]);
+  }, [selectedConcernsForModal, detail.matrix.cells, detail.matrix.documents, docPickerKindFilter, docPickerSearch, docPickerTextMatches, documentModal]);
 
   const canCloseDocumentModalWithEsc = useMemo(() => {
     if (!documentModal) return false;
@@ -2763,26 +2885,6 @@ export function ThreadPage({
     resetDocumentModal();
   }
 
-  async function handleRemoveDoc(nodeId: string, concern: string, doc: MatrixCellDoc) {
-    if (!onRemoveMatrixDoc) return;
-    const mutationKey = `remove:${nodeId}:${concern}:${doc.hash}:${doc.refType}`;
-    setActiveMatrixMutation(mutationKey);
-    setMatrixError("");
-
-    const result = await onRemoveMatrixDoc({
-      nodeId,
-      concern,
-      docHash: doc.hash,
-      refType: doc.refType,
-    });
-
-    setActiveMatrixMutation("");
-    const error = getErrorMessage(result);
-    if (error) {
-      setMatrixError(error);
-    }
-  }
-
   async function handleCreateAndAttachDocument() {
     if (!documentModal || !onCreateMatrixDocument) return;
 
@@ -2885,11 +2987,20 @@ export function ThreadPage({
     if (!documentModal || !docModalEditHash || !onReplaceMatrixDocument) return;
 
     const isPromptEdit = documentModal.refType === "Prompt";
+    if (!isPromptEdit && !detail.matrix.documents.some((entry) => entry.hash === docModalEditHash)) {
+      setDocumentModalError("Source document not found.");
+      return;
+    }
+
+    // editingDocumentForModal carries the on-demand body, and is null until it
+    // loads — saving against an unread body would drop the whole document text.
     const existing = isPromptEdit
       ? detail.systemPrompts.find((prompt) => prompt.hash === docModalEditHash) ?? null
-      : detail.matrix.documents.find((entry) => entry.hash === docModalEditHash);
+      : editingDocumentForModal;
     if (!existing) {
-      setDocumentModalError("Source document not found.");
+      setDocumentModalError(
+        isPromptEdit ? "Source document not found." : "Document is still loading.",
+      );
       return;
     }
 
@@ -3025,7 +3136,6 @@ export function ThreadPage({
 
       const payload = (result as { messages?: ChatMessage[] } | null) ?? {};
       const userMessageId = payload.messages?.find((message) => message.role === "User")?.id ?? null;
-      setPendingPlanActionId(null);
       setChatInput("");
 
       if (!onRunAssistant || !userMessageId) {
@@ -3062,51 +3172,6 @@ export function ThreadPage({
       setAssistantSummaryStatus(null);
     } finally {
       setIsSendingChat(false);
-      setIsRunningAssistant(false);
-    }
-  }
-
-  async function handleRunAssistant(mode: AssistantRunMode, planActionId: string | null = null) {
-    if (!onRunAssistant || !effectiveCanEdit || !isAssistantRunEnabled || isChatInputsDisabled) return;
-
-    setIsRunningAssistant(true);
-    setAssistantError("");
-    clearAssistantSummary();
-
-    try {
-      const result = await onRunAssistant({
-        chatMessageId: null,
-        mode,
-        planActionId: mode === "direct" ? (planActionId ?? null) : null,
-        model: selectedAgentModel,
-      });
-
-      const error = getErrorMessage(result);
-      if (error) {
-        setAssistantError(error);
-        setAssistantSummaryStatus(null);
-        return;
-      }
-
-      if (!result) {
-        setAssistantError("No response from assistant endpoint.");
-        setAssistantSummaryStatus(null);
-        return;
-      }
-
-      const payload = result as AssistantRunResponse;
-      if (mode === "plan" && payload.planActionId) {
-        setPendingPlanActionId(payload.planActionId);
-      }
-
-      if (mode === "direct") {
-        setPendingPlanActionId(null);
-        updateAssistantSummary(payload);
-        return;
-      }
-
-      setAssistantSummaryStatus(getRunSummary(payload).status);
-    } finally {
       setIsRunningAssistant(false);
     }
   }
@@ -3154,6 +3219,7 @@ export function ThreadPage({
     const showMarkdownFields = activeSourceType === "local";
     const isSaveDisabled =
       isDocumentModalBusy ||
+      isEditingDocumentTextPending ||
       (isRemoteSource && !sourceConnected && (isCreateMode || isEditMode));
     const renderConcernPicker = () => {
       if (isPromptModal) return null;
@@ -3475,7 +3541,8 @@ export function ThreadPage({
                           rows={8}
                           value={docModalBody}
                           onChange={(event) => setDocModalBody(event.target.value)}
-                          placeholder="Write document markdown"
+                          disabled={isEditingDocumentTextPending}
+                          placeholder={isEditingDocumentTextPending ? "Loading document..." : "Write document markdown"}
                         />
                       ) : (
                         <div className="md-preview">
@@ -4111,6 +4178,11 @@ export function ThreadPage({
                 ))
               )}
             </div>
+
+            {/* role="alert" because these appear after the user has already
+                looked away from the send button, waiting on the assistant. */}
+            {chatError && <p className="field-error" role="alert">{chatError}</p>}
+            {assistantError && <p className="field-error" role="alert">{assistantError}</p>}
 
             {effectiveCanEdit ? (
               <div className="thread-chat-form">

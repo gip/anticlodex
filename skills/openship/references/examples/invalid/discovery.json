@@ -1,0 +1,13 @@
+{
+  "openship": "1.0",
+  "capability": "discovery",
+  "project": { "name": "Broken", "description": "Sources is missing." },
+  "capabilities": {
+    "changes": {
+      "policy": "https://example.com/openship/policy.json",
+      "submit": "https://example.com/openship/changes",
+      "status": "https://example.com/openship/changes/{changeId}"
+    }
+  }
+}
+

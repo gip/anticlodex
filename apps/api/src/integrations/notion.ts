@@ -49,7 +49,7 @@ interface NotionBlockResponse {
   }>;
 }
 
-interface NotionApiError extends Error {
+export interface NotionApiError extends Error {
   provider: "notion";
   status: number;
   code: "NOTION_API_ERROR";
@@ -356,4 +356,10 @@ export function parseSourceUrl(sourceUrl: string): SourceLookupResult {
 
 export async function revokeAccessToken(token: string): Promise<void> {
   await requestNotionTokenRevocation(token);
+}
+
+export function isNotionApiError(value: unknown): value is NotionApiError {
+  return typeof value === "object"
+    && value !== null
+    && (value as { code?: string }).code === "NOTION_API_ERROR";
 }

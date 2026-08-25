@@ -14,10 +14,10 @@ AntiClodeX ships a v1 public API only in this phase.
 
 - Base URL: `https://{host}/v1`
 - Auth: Bearer token only
-- Tenant scope comes from Auth0 claims:
+- Tenant scope comes from WorkOS access-token claims:
   - `sub` (subject)
-  - `orgId`
-  - `scope`
+  - `org_id`
+  - `role` and `permissions` when an organization is selected
 
 All responses use:
 - IDs: UUID for `id`, path params, and body references

@@ -33,9 +33,9 @@ pnpm --filter @acx/api migrate:down:last
 
 pnpm workspace monorepo with these app/package directories:
 
-- **apps/web** — React 19 SPA, Vite, Auth0 web login, port 3000
+- **apps/web** — React 19 SPA, Vite, WorkOS AuthKit web login, port 3000
 - **apps/desktop** — Electron 40 + React 19 via `electron-vite`
-- **apps/api** — Fastify 5 API, PostgreSQL via `pg`, Auth0 JWT verification via `jose`
+- **apps/api** — Fastify 5 API, PostgreSQL via `pg`, WorkOS JWT verification via `jose`
 - **packages/ui** — Shared React components consumed directly by the web and desktop apps
 - **packages/agent-runtime** — Shared agent/runtime types and helpers used by API and desktop
 
@@ -48,23 +48,23 @@ pnpm workspace monorepo with these app/package directories:
 
 ### Auth Flow
 
-- **Web:** Auth0 React SDK, `cacheLocation="localstorage"`, refresh tokens enabled, bearer token sent to the API
-- **Desktop:** Auth0 PKCE flow with a local callback server on `127.0.0.1:17823`, then token sync through the API `/me` endpoint under `/v1`
-- **API:** Bearer token verification against Auth0 JWKS, then user lookup/create in PostgreSQL with `req.auth` attached on success
+- **Web:** WorkOS AuthKit React SDK obtains and refreshes access tokens, which are sent to the API as bearer tokens
+- **Desktop:** WorkOS AuthKit Electron SDK runs system-browser PKCE through `anticlodex://auth/callback` and stores refresh tokens with Electron `safeStorage`
+- **API:** Bearer tokens are verified against the WorkOS client JWKS, then users are looked up/created in PostgreSQL with `req.auth` attached on success
 
 ### Database
 
 - PostgreSQL connection lives in `apps/api/src/db.ts` via `pg.Pool`
 - The current migration entrypoint is `apps/api/db/migrations/001_init_full_schema.sql`
 - `pnpm migrate` delegates to the API package migration command; do not assume it is a safe reset wrapper unless you inspect the current migration scripts
-- User creation/upsert is handled in `apps/api/src/auth.ts`
+- User creation/upsert and one-time Auth0 `external_id` rebinding are handled in `apps/api/src/auth.ts`
 
 ### Electron-specific
 
 - Preload must output CommonJS via `lib.formats: ["cjs"]` in `apps/desktop/electron.vite.config.ts`
 - Renderer root must remain `src/renderer`
 - Main process env exposure uses `envPrefix: "VITE_"`
-- Auth IPC channels are `auth:get-state`, `auth:login`, `auth:logout`, `auth:state-changed`
+- Auth IPC channels and refresh-token confinement are owned by `@workos/authkit-electron`
 
 ## Code Conventions
 
@@ -72,13 +72,13 @@ pnpm workspace monorepo with these app/package directories:
 - TypeScript strict mode, target ES2022
 - No ORM; use raw parameterized SQL
 - Shared UI lives in `packages/ui` and is imported directly rather than built separately
-- Auth0 tenant/domain is `edfi.us.auth0.com`
+- WorkOS setup and Auth0 user-import steps are documented in `docs/auth-workos.md`
 - Environment variables are copied from each app's `.env.example` to `.env.local`
 
 ## Environment Notes
 
 - API defaults to `http://localhost:3001` and is registered under `/v1`
-- Web and desktop clients both expect Auth0 env vars plus an API URL
+- Web and desktop clients expect a WorkOS client ID; the API also requires a WorkOS API key
 - API Redis cache env vars:
   - `REDIS_URL` enables anonymous response caching
   - `REDIS_PREFIX` overrides the Redis key prefix

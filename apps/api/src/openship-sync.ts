@@ -3,7 +3,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { PoolClient } from "pg";
-import pool, { query } from "./db.js";
+import pool from "./db.js";
 
 const SYSTEM_PROMPT_CONCERN = "__system_prompt__";
 const OPENSHIP_ROOT_NODE_ID = "s.root";

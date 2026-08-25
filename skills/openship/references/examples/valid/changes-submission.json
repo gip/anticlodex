@@ -1,0 +1,11 @@
+{
+  "openship": "1.0",
+  "capability": "changes",
+  "base": "sha256:1d322539e651a3c2d7c51eb8b33160627395b9601bff909e599771b806d9e565",
+  "title": "Update the example page",
+  "intent": "Make the example visibly identify its second candidate version.",
+  "files": {
+    "app/page.js": { "encoding": "utf-8", "content": "export default function Page(){return \"v2\"}\n" }
+  }
+}
+

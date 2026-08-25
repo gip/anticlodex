@@ -1,31 +1,24 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { Auth0Provider } from "@auth0/auth0-react";
+import { AuthKitProvider } from "@workos-inc/authkit-react";
 import { ThemeProvider, SchemeProvider } from "@acx/ui";
 import "@acx/ui/styles.css";
 import { App } from "./app";
 
-const domain = import.meta.env.VITE_AUTH0_DOMAIN ?? "";
-const clientId = import.meta.env.VITE_AUTH0_CLIENT_ID ?? "";
+const clientId = import.meta.env.VITE_WORKOS_CLIENT_ID ?? "";
+const apiHostname = import.meta.env.VITE_WORKOS_API_HOSTNAME?.trim() || undefined;
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <Auth0Provider
-      domain={domain}
+    <AuthKitProvider
       clientId={clientId}
-      cacheLocation="localstorage"
-      useRefreshTokens
-      authorizationParams={{
-        redirect_uri: window.location.origin,
-        audience: import.meta.env.VITE_AUTH0_AUDIENCE,
-        scope: "openid profile email offline_access",
-      }}
+      apiHostname={apiHostname}
     >
       <SchemeProvider>
         <ThemeProvider>
           <App />
         </ThemeProvider>
       </SchemeProvider>
-    </Auth0Provider>
+    </AuthKitProvider>
   </StrictMode>,
 );

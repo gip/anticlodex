@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useAuth as useWorkOSAuth } from "@workos/authkit-electron/react";
 import {
   AuthContext,
   useAuth,
@@ -29,6 +30,10 @@ import {
   type Collaborator,
   type Concern,
   type SearchResult,
+  type OpenShipProjectInfo,
+  type OpenShipRemoteChange,
+  pollOpenShipChange,
+  submitOpenShipChanges,
 } from "@acx/ui";
 
 function normalizeApiUrl(raw: string): string {
@@ -37,15 +42,15 @@ function normalizeApiUrl(raw: string): string {
   return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
 }
 
-function isNumericThreadRouteId(threadId: string): boolean {
-  return /^\d+$/.test(threadId.trim());
-}
-
 function appendProjectScope(path: string, projectId: string | null): string {
   if (!projectId) return path;
   const separator = path.includes("?") ? "&" : "?";
   return `${path}${separator}projectId=${encodeURIComponent(projectId)}`;
 }
+
+// Thread events arrive in bursts (a run start plus its claim, a batch of matrix
+// writes). Collapse a burst into a single re-read on the trailing edge.
+const THREAD_REFRESH_DEBOUNCE_MS = 250;
 
 const API_URL = normalizeApiUrl(import.meta.env.VITE_API_URL ?? "http://localhost:3001");
 
@@ -103,14 +108,6 @@ interface V1ProjectSettingsPayload {
   projectRoles: string[];
   concerns: Concern[];
   collaborators: Collaborator[];
-}
-
-interface V1RunStartResponse {
-  runId?: string;
-  status?: "queued" | "running" | "success" | "failed" | "cancelled";
-  mode?: "direct" | "plan";
-  threadId?: string;
-  systemId?: string;
 }
 
 interface V1EventItem {
@@ -225,33 +222,6 @@ function normalizeThread(row: V1ThreadListItem): {
   };
 }
 
-function toThreadDetailFromSummary(
-  row: {
-    id: string;
-    title: string | null;
-    description: string | null;
-    status: "open" | "closed" | "committed";
-    createdAt?: string;
-    createdByHandle?: string;
-    ownerHandle?: string;
-    projectName?: string;
-    accessRole?: string;
-  },
-  project: V1ProjectListItem,
-): ThreadDetail {
-  return {
-    id: row.id,
-    title: row.title ?? "Thread",
-    description: row.description,
-    status: row.status,
-    createdAt: row.createdAt ?? new Date().toISOString(),
-    createdByHandle: row.createdByHandle ?? project.ownerHandle,
-    ownerHandle: row.ownerHandle ?? project.ownerHandle,
-    projectName: row.projectName ?? project.name,
-    accessRole: row.accessRole ?? project.accessRole,
-  };
-}
-
 async function resolveProject(
   apiFetch: ReturnType<typeof useApi>,
   handle: string,
@@ -283,14 +253,6 @@ function toEnvelopePayload<T>(raw: {
     pageSize: raw.pageSize ?? 50,
     nextCursor: raw.nextCursor ?? null,
   };
-}
-
-interface ElectronAuthAPI {
-  getState: () => Promise<{ isAuthenticated: boolean }>;
-  getValidAccessToken: (options?: { forceRefresh?: boolean }) => Promise<string | null>;
-  login: () => void;
-  logout: () => void;
-  onStateChanged: (cb: (state: { isAuthenticated: boolean }) => void) => () => void;
 }
 
 interface AssistantRunResultResponse {
@@ -338,11 +300,19 @@ interface ElectronAssistantAPI {
   }) => Promise<AssistantRunResultResponse>;
 }
 
+interface ElectronAuthBrokerAPI {
+  onAccessTokenRequested: (callback: (requestId: string) => void) => () => void;
+  respondWithAccessToken: (
+    requestId: string,
+    result: { token?: string; error?: string },
+  ) => void;
+}
+
 declare global {
   interface Window {
     electronAPI: {
       platform: string;
-      auth: ElectronAuthAPI;
+      auth: ElectronAuthBrokerAPI;
       assistant?: ElectronAssistantAPI;
     };
   }
@@ -649,35 +619,35 @@ async function readError(res: Response, fallback: string) {
   return fallback;
 }
 
-async function desktopApiFetch(path: string, init?: RequestInit): Promise<Response> {
-  const request = async (forceRefresh = false) => {
-    const token = await window.electronAPI.auth.getValidAccessToken({ forceRefresh });
-    if (!token) throw new Error("Not authenticated");
+async function desktopApiFetch(
+  path: string,
+  init: RequestInit | undefined,
+  getAccessToken: () => Promise<string | null>,
+  signOut: () => Promise<unknown>,
+): Promise<Response> {
+  const token = await getAccessToken();
+  if (!token) throw new Error("Not authenticated");
 
-    const headers = new Headers(init?.headers ?? {});
-    headers.set("Authorization", `Bearer ${token}`);
+  const headers = new Headers(init?.headers ?? {});
+  headers.set("Authorization", `Bearer ${token}`);
 
-    return fetch(`${API_URL}${path}`, {
-      ...init,
-      headers,
-    });
-  };
-
-  let response = await request();
+  const response = await fetch(`${API_URL}${path}`, {
+    ...init,
+    headers,
+  });
   if (response.status === 401) {
-    response = await request(true);
-    if (response.status === 401) {
-      window.electronAPI.auth.logout();
-    }
+    await signOut();
   }
 
   return response;
 }
 
 function useApi() {
+  const { getAccessToken, signOut } = useWorkOSAuth();
   const apiFetch = useCallback(
-    async (path: string, init?: RequestInit) => desktopApiFetch(path, init),
-    [],
+    async (path: string, init?: RequestInit) =>
+      desktopApiFetch(path, init, getAccessToken, signOut),
+    [getAccessToken, signOut],
   );
 
   return apiFetch;
@@ -717,10 +687,13 @@ function HomeRoute({
       }}
       onCreateProject={async (data) => {
         try {
-          const res = await apiFetch("/projects", {
+          const { openshipImport, ...projectInput } = data;
+          const res = await apiFetch(openshipImport ? "/projects/imports/openship" : "/projects", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(data),
+            body: JSON.stringify(openshipImport
+              ? { ...projectInput, template: undefined, ...openshipImport }
+              : projectInput),
           });
           if (!res.ok) {
             const body = await res.json().catch(() => ({}));
@@ -895,6 +868,7 @@ function ProjectRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: 
   const { handle, project: projectName } = useParams<{ handle: string; project: string }>();
   const apiFetch = useApi();
   const [project, setProject] = useState<Project | null>(null);
+  const [openship, setOpenShip] = useState<OpenShipProjectInfo | null>(null);
   const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
@@ -924,6 +898,10 @@ function ProjectRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: 
         ...normalizeProject(found),
         threads,
       });
+      const openshipRes = await apiFetch(
+        `/projects/${encodeURIComponent(handle)}/${encodeURIComponent(projectName)}/openship`,
+      );
+      if (openshipRes.ok) setOpenShip(await openshipRes.json() as OpenShipProjectInfo);
     };
 
     loadProject().catch(() => setNotFound(true));
@@ -948,6 +926,36 @@ function ProjectRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: 
   return (
     <ProjectPage
       project={project}
+      openship={openship}
+      onSubmitOpenShipChanges={openship?.discovery ? async (title, intent) => {
+        try {
+          return await submitOpenShipChanges({
+            apiFetch,
+            projectPath: `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}`,
+            discovery: openship.discovery as Parameters<typeof submitOpenShipChanges>[0]["discovery"],
+            title,
+            intent,
+          });
+        } catch (error) {
+          return { error: error instanceof Error ? error.message : "Changes submission failed" };
+        }
+      } : undefined}
+      onListOpenShipChanges={openship?.discovery ? async () => {
+        const res = await apiFetch(`/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}/openship/remote-changes`);
+        if (!res.ok) return { error: await readError(res, "Failed to load candidate history") };
+        return (await res.json() as { changes: OpenShipRemoteChange[] }).changes;
+      } : undefined}
+      onPollOpenShipChange={openship?.discovery ? async (change) => {
+        try {
+          return await pollOpenShipChange({
+            apiFetch,
+            projectPath: `/projects/${encodeURIComponent(handle!)}/${encodeURIComponent(projectName!)}`,
+            change,
+          });
+        } catch (error) {
+          return { error: error instanceof Error ? error.message : "Changes status failed" };
+        }
+      } : undefined}
       onUpdateDescription={async (description) => {
         if (!handle || !projectName) {
           return { error: "Project not found" };
@@ -1369,71 +1377,64 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
   const eventStreamAbortRef = useRef<AbortController | null>(null);
   const eventPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventRefreshPromiseRef = useRef<Promise<void> | null>(null);
+  const eventRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [integrationStatuses, setIntegrationStatuses] = useState<IntegrationStatusRecord>({
     notion: "disconnected",
     google: "disconnected",
   });
 
-  useEffect(() => {
-    if (!isAuthenticated || !handle || !projectName) {
-      setThreadProjectId(null);
-      return;
-    }
-    setThreadProjectId(null);
-    let cancelled = false;
-    resolveProject(apiFetch, handle, projectName)
-      .then((projectRecord) => {
-        if (!cancelled) setThreadProjectId(projectRecord?.id ?? null);
-      })
-      .catch(() => {
-        if (!cancelled) setThreadProjectId(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [apiFetch, handle, isAuthenticated, projectName]);
-
   const threadPathWithScope = useCallback((suffix = ""): string | null => {
     if (!threadId) return null;
     const path = `/threads/${encodeURIComponent(threadId)}${suffix}`;
-    return appendProjectScope(path, threadProjectId);
-  }, [threadId, threadProjectId]);
+    return appendThreadScope(path, threadProjectId, handle, projectName);
+  }, [handle, projectName, threadId, threadProjectId]);
 
   const resolveThreadProjectId = useCallback(async (): Promise<string | null> => {
     if (threadProjectId) return threadProjectId;
+    if (detail?.thread.projectId) return detail.thread.projectId;
     if (!handle || !projectName) return null;
     const projectRecord = await resolveProject(apiFetch, handle, projectName);
     const resolved = projectRecord?.id ?? null;
     if (resolved) setThreadProjectId(resolved);
     return resolved;
-  }, [apiFetch, handle, projectName, threadProjectId]);
+  }, [apiFetch, detail?.thread.projectId, handle, projectName, threadProjectId]);
 
   const refreshThread = useCallback(async () => {
-    if (!threadId) return;
-    if (isNumericThreadRouteId(threadId) && !threadProjectId) return;
     const scopedPath = threadPathWithScope();
     if (!scopedPath) return;
     const threadRes = await apiFetch(scopedPath);
     if (!threadRes.ok) return;
     const nextDetail = (await threadRes.json()) as ThreadDetailPayload;
     setDetail(nextDetail);
-  }, [apiFetch, threadId, threadPathWithScope, threadProjectId]);
+    setThreadProjectId(nextDetail.thread.projectId ?? null);
+  }, [apiFetch, threadPathWithScope]);
 
+  // This used to be an in-flight guard, which dropped every event that arrived
+  // while a refresh was running -- a change committed just after a read started
+  // was never picked up. A trailing edge collapses a burst into one request and
+  // still guarantees a read after the last event in it. The chaining keeps two
+  // responses from landing out of order and leaving stale detail on screen.
   const refreshThreadDebounced = useCallback(() => {
-    if (eventRefreshPromiseRef.current) return;
-    const refresh = (async () => {
-      try {
-        await refreshThread();
-      } catch (error) {
-        console.error("Thread refresh failed:", error);
-      } finally {
+    if (eventRefreshTimerRef.current) clearTimeout(eventRefreshTimerRef.current);
+    eventRefreshTimerRef.current = setTimeout(() => {
+      eventRefreshTimerRef.current = null;
+      const refresh = (eventRefreshPromiseRef.current ?? Promise.resolve())
+        .then(() => refreshThread())
+        .catch((error: unknown) => {
+          console.error("Thread refresh failed:", error);
+        });
+      eventRefreshPromiseRef.current = refresh;
+      void refresh.finally(() => {
         if (eventRefreshPromiseRef.current === refresh) {
           eventRefreshPromiseRef.current = null;
         }
-      }
-    })();
-    eventRefreshPromiseRef.current = refresh;
+      });
+    }, THREAD_REFRESH_DEBOUNCE_MS);
   }, [refreshThread]);
+
+  useEffect(() => () => {
+    if (eventRefreshTimerRef.current) clearTimeout(eventRefreshTimerRef.current);
+  }, []);
 
   const handleThreadEvent = useCallback(
     async (event: V1EventItem) => {
@@ -1463,6 +1464,15 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
       console.error("Failed to process v1 event:", error);
     }
   }, [handleThreadEvent]);
+
+  // The stream effect reads the handler through a ref. Depending on the callback
+  // itself tore the connection down and rebuilt it every time thread state
+  // changed, and each reconnect restarted from a null cursor and replayed the
+  // last hundred events -- every matching one triggering another refetch.
+  const processEventPayloadRef = useRef(processEventPayload);
+  useEffect(() => {
+    processEventPayloadRef.current = processEventPayload;
+  }, [processEventPayload]);
 
   useEffect(() => {
     if (!isAuthenticated || !threadId) return;
@@ -1502,7 +1512,7 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
             };
             const items = payload.items ?? [];
             for (const event of items) {
-              await processEventPayload(event);
+              await processEventPayloadRef.current(event);
             }
             if (items.length > 0) {
               eventCursorRef.current = payload.nextCursor ?? eventCursorFromItem(items[items.length - 1] as V1EventItem);
@@ -1569,7 +1579,7 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
                   const eventData = JSON.parse(packet.data) as V1EventItem;
                   eventData.id = packet.id || eventCursorFromItem(eventData);
                   eventCursorRef.current = eventData.id;
-                  await processEventPayload(eventData);
+                  await processEventPayloadRef.current(eventData);
                 } catch (parseError) {
                   console.error("Failed to parse SSE packet:", parseError);
                 }
@@ -1610,7 +1620,7 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
       stopPolling();
       pollingOnly = true;
     };
-  }, [apiFetch, handleThreadEvent, isAuthenticated, processEventPayload, threadId]);
+  }, [apiFetch, isAuthenticated, threadId]);
 
   const refreshIntegrationStatuses = useCallback(async () => {
     const nextStatuses: IntegrationStatusRecord = {
@@ -1653,19 +1663,24 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
 
   useEffect(() => {
     if (!isAuthenticated || !threadId) return;
-    if (isNumericThreadRouteId(threadId) && !threadProjectId) return;
 
     setNotFound(false);
     setDetail(null);
+    setThreadProjectId(null);
+    let cancelled = false;
 
-    const scopedPath = threadPathWithScope();
-    if (!scopedPath) {
-      setNotFound(true);
-      return;
-    }
+    // Scoped by handle/projectName rather than by threadProjectId, so this does
+    // not re-run when the project id arrives in the response.
+    const scopedPath = appendThreadScope(
+      `/threads/${encodeURIComponent(threadId)}`,
+      null,
+      handle,
+      projectName,
+    );
 
     apiFetch(scopedPath)
       .then(async (res) => {
+        if (cancelled) return;
         if (res.status === 404) {
           setNotFound(true);
           return;
@@ -1673,10 +1688,19 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
         if (!res.ok) {
           throw new Error(await readError(res, "Failed to load thread"));
         }
-        setDetail(await res.json());
+        const payload = (await res.json()) as ThreadDetailPayload;
+        if (cancelled) return;
+        setDetail(payload);
+        setThreadProjectId(payload.thread.projectId ?? null);
       })
-      .catch(() => setNotFound(true));
-  }, [isAuthenticated, threadId, apiFetch, threadPathWithScope, threadProjectId]);
+      .catch(() => {
+        if (!cancelled) setNotFound(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, threadId, apiFetch, handle, projectName]);
 
   if (notFound) {
     return (
@@ -1794,6 +1818,22 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
         const data = (await res.json()) as MatrixRefMutationResponse;
         setDetail((prev) => (prev ? applyMatrixMutationResponse(prev, data) : prev));
         return data;
+      }}
+      onLoadDocumentText={async (documentHash) => {
+        const scopedPath = threadPathWithScope(`/matrix/documents/${encodeURIComponent(documentHash)}`);
+        if (!scopedPath) return null;
+        const res = await apiFetch(scopedPath);
+        if (!res.ok) return null;
+        const data = (await res.json()) as { document: { text: string } };
+        return data.document.text;
+      }}
+      onSearchDocumentText={async (searchQuery) => {
+        const scopedPath = threadPathWithScope(`/matrix/documents?q=${encodeURIComponent(searchQuery)}`);
+        if (!scopedPath) return null;
+        const res = await apiFetch(scopedPath);
+        if (!res.ok) return null;
+        const data = (await res.json()) as { hashes: string[] };
+        return data.hashes;
       }}
       onCreateMatrixDocument={async (payload: MatrixDocumentCreateInput) => {
         const scopedPath = threadPathWithScope("/matrix/documents");
@@ -2258,8 +2298,9 @@ function AppShell({
 }
 
 export function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  const { user: workOSUser, isLoading, signIn, signOut, getAccessToken } = useWorkOSAuth();
+  const isAuthenticated = workOSUser !== null;
+  const apiFetch = useApi();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsKey, setProjectsKey] = useState(0);
@@ -2267,20 +2308,21 @@ export function App() {
   const refreshProjects = useCallback(() => setProjectsKey((k) => k + 1), []);
 
   useEffect(() => {
-    const { auth } = window.electronAPI;
-
-    auth.getState().then((state) => {
-      setIsAuthenticated(state.isAuthenticated);
-      setIsLoading(false);
+    return window.electronAPI.auth.onAccessTokenRequested((requestId) => {
+      void getAccessToken()
+        .then((token) => {
+          window.electronAPI.auth.respondWithAccessToken(
+            requestId,
+            token ? { token } : { error: "Not authenticated" },
+          );
+        })
+        .catch((error: unknown) => {
+          window.electronAPI.auth.respondWithAccessToken(requestId, {
+            error: error instanceof Error ? error.message : "Authentication refresh failed",
+          });
+        });
     });
-
-    const unsubscribe = auth.onStateChanged((state) => {
-      setIsAuthenticated(state.isAuthenticated);
-      setIsLoading(false);
-    });
-
-    return unsubscribe;
-  }, []);
+  }, [getAccessToken]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -2289,7 +2331,7 @@ export function App() {
       return;
     }
 
-    Promise.all([desktopApiFetch("/me"), desktopApiFetch("/projects")])
+    Promise.all([apiFetch("/me"), apiFetch("/projects")])
       .then(async ([meRes, projRes]) => {
         if (meRes.ok) {
           const me = await meRes.json();
@@ -2304,7 +2346,7 @@ export function App() {
       .catch((err) => {
         console.error("API fetch failed:", err);
       });
-  }, [isAuthenticated, projectsKey]);
+  }, [apiFetch, isAuthenticated, projectsKey]);
 
   return (
     <AuthContext.Provider
@@ -2312,8 +2354,8 @@ export function App() {
         isAuthenticated,
         isLoading,
         user,
-        login: () => window.electronAPI.auth.login(),
-        logout: () => window.electronAPI.auth.logout(),
+        login: () => void signIn(),
+        logout: () => void signOut(),
       }}
     >
       <AppShell projects={projects} setProjects={setProjects} isAuthenticated={isAuthenticated} refreshProjects={refreshProjects} />

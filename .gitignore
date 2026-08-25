@@ -1,4 +1,5 @@
 node_modules
+.pnpm-store
 dist
 out
 .env
@@ -6,3 +7,4 @@ out
 .env*.local
 *.tsbuildinfo
 .vite
+release

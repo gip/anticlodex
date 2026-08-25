@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openship.dev/schemas/changes-violation.schema.json",
+  "title": "OpenShip Changes v1 synchronous violation response",
+  "type": "object",
+  "required": ["openship", "capability", "error", "message", "violations"],
+  "properties": {
+    "openship": { "const": "1.0" },
+    "capability": { "const": "changes" },
+    "error": { "enum": ["stale_base", "policy_violation"] },
+    "message": { "type": "string", "minLength": 1 },
+    "base": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "policy": { "type": "string", "format": "uri" },
+    "violations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["gate", "rule", "message"],
+        "properties": {
+          "gate": { "enum": ["envelope", "path", "size", "content", "tree"] },
+          "rule": { "type": "string", "minLength": 1 },
+          "path": { "type": "string", "minLength": 1 },
+          "line": { "type": "integer", "minimum": 1 },
+          "message": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

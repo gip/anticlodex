@@ -1,0 +1,47 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.10/schema.json",
+  "files": { "includes": ["apps/**/src/**", "packages/**/src/**"] },
+
+  // Formatting is intentionally off. Adopting Biome's formatter would rewrite
+  // ~33k lines in one commit and bury real changes in review; enable it as a
+  // deliberate, standalone reformat when the team is ready.
+  "formatter": { "enabled": false },
+
+  "linter": {
+    "enabled": true,
+    "rules": {
+      // Starting from "none" rather than the recommended preset: the preset
+      // reports ~180 findings here, and a CI that is red on day one gets
+      // ignored. These rules are the ones the repo is clean against today, so
+      // CI enforces from the first commit. See the parked list below.
+      "preset": "none",
+      "correctness": {
+        "noUnusedVariables": "error",
+        "noUnusedImports": "error",
+        "noUnusedFunctionParameters": "error"
+      },
+      "suspicious": { "useIterableCallbackReturn": "error" },
+      "complexity": {
+        "noUselessEscapeInRegex": "error",
+        "noExtraBooleanCast": "error"
+      },
+      "style": { "useImportType": "error" }
+
+      // Parked, tracked as real debt — turn on one rule at a time and fix the
+      // batch it reports:
+      //   a11y (~65 findings)                  useButtonType,
+      //     noStaticElementInteractions, useKeyWithClickEvents,
+      //     noLabelWithoutControl, noAutofocus, useAriaPropsSupportedByRole,
+      //     noAriaHiddenOnFocusable
+      //   correctness/useExhaustiveDependencies (9)  needs per-hook judgement;
+      //     auto-fixing these can introduce render loops
+      //   suspicious/noArrayIndexKey (7)
+      //   style/noNonNullAssertion (24), suspicious/noConfusingVoidType (16),
+      //     complexity/useOptionalChain (12)   stylistic; low priority
+      //
+      // security/noDangerouslySetInnerHtml is deliberately NOT enabled: the six
+      // sites it flags all render sanitized markdown through renderMarkdown(),
+      // which is covered by packages/ui/src/markdown.test.ts.
+    }
+  }
+}

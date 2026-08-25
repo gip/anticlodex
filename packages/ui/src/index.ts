@@ -3,7 +3,9 @@ export { ThemeProvider, useTheme } from "./theme";
 export { SchemeProvider, useScheme, SCHEMES, type Scheme } from "./scheme";
 export { Header } from "./header";
 export { Home, type Project, type Thread } from "./home";
-export { ProjectPage } from "./project-page";
+export { ProjectPage, type OpenShipProjectInfo } from "./project-page";
+export { submitOpenShipChanges, pollOpenShipChange } from "./openship-changes";
+export type { OpenShipHeaderAdapter, OpenShipRemoteChange } from "./openship-changes";
 export { SettingsPage, type SettingsPageProps } from "./settings-page";
 export {
   ThreadPage,

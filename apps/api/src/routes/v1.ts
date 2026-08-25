@@ -3,12 +3,37 @@ import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
+import {
+  OpenShipValidationError,
+  normalizeOpenShipOrigin,
+  validateDiscovery,
+  validateSources,
+} from "@openship/protocol";
 
 import pool, { query } from "../db.js";
 import { generateOpenShipFileBundle } from "../agent-runner.js";
 import { verifyAuth, verifyOptionalAuth, type AuthUser } from "../auth.js";
+import { SQL_LIKE_ESCAPE_CHARACTER, toLikeContainsPattern } from "../sql-like.js";
+import {
+  buildDocumentAddSummary,
+  buildDocumentCreateSummary,
+  buildDocumentModifySummary,
+  buildDocumentRemoveSummary,
+  buildDocumentText,
+  computeDocumentHash,
+  deriveDocumentName,
+  isValidDocumentName,
+  normalizeMatrixDocumentCreateBody,
+  normalizeMatrixDocumentReplaceBody,
+  normalizeMatrixRefBody,
+  parseDocumentText,
+  type DocKind,
+  type MatrixRefPayload,
+} from "../documents.js";
+import { fetchRemoteDocument, isIntegrationReconnectError } from "../integrations/tokens.js";
+import { isNotionApiError } from "../integrations/notion.js";
 import {
   claimAgentRunById,
   enqueueAgentRunWithWait,
@@ -25,7 +50,6 @@ import {
   queryEvents,
   encodeCursor,
   parseCursor,
-  type ACXEvent,
 } from "../events.js";
 import {
   BLANK_TEMPLATE_ID,
@@ -35,6 +59,15 @@ import {
   type TemplateDefinition,
   type TemplateDocument,
 } from "../templates/index.js";
+import {
+  emptySources,
+  exportSources,
+  exportSourcesDigest,
+  exportSystems,
+  persistSources,
+  populateOpenShipSystem,
+  verifyImportSnapshot,
+} from "../openship-v1.js";
 
 type AccessRole = "Owner" | "Editor" | "Viewer";
 type V1OpenShipNodeKind = "Root" | "Host" | "Container" | "Process" | "Library";
@@ -305,31 +338,6 @@ interface V1RunChatMessage {
   createdAt: string;
 }
 
-interface V1RunFileChange {
-  kind: "Create" | "Update" | "Delete";
-  path: string;
-  fromHash?: string;
-  toHash?: string;
-}
-
-type V1RunResultStatus = "queued" | "running" | "success" | "failed" | "cancelled";
-
-interface V1RunResponse {
-  runId: string;
-  status: V1RunResultStatus;
-  mode: AssistantMode;
-  threadId: string;
-  systemId: string;
-  filesChanged: V1RunFileChange[];
-  summary: {
-    status: "success" | "failed" | "cancelled" | "queued" | "running";
-    messages: string[];
-  };
-  changesCount: number;
-  messages: V1RunChatMessage[];
-  threadState?: Record<string, unknown>;
-}
-
 interface V1OpenShipBundleFile {
   path: string;
   content: string;
@@ -394,7 +402,7 @@ interface V1ProjectThreadConcernRow {
   position: number;
 }
 
-interface V1ProjectThreadDocumentRow {
+interface V1ThreadDocumentMetadataRow {
   hash: string;
   kind: string;
   title: string;
@@ -404,11 +412,24 @@ interface V1ProjectThreadDocumentRow {
   source_external_id: string | null;
   source_metadata: Record<string, unknown> | null;
   source_connected_user_id: string | null;
+}
+
+interface V1ProjectThreadDocumentRow extends V1ThreadDocumentMetadataRow {
   text: string;
 }
 
 interface V1ChatMessageRow {
   content: string;
+}
+
+interface V1ChatMessage {
+  id: string;
+  actionId: string;
+  role: "User" | "Assistant" | "System";
+  actionType: string;
+  actionPosition: number;
+  content: string;
+  createdAt: string;
 }
 
 interface V1SystemPromptRow {
@@ -501,6 +522,11 @@ interface V1ThreadPatchBody {
 
 interface V1ThreadScopeQuerystring {
   projectId?: string;
+  // A numeric threadId is only unique within a project, so it needs a scope. A
+  // client that routes by /:handle/:projectName/:threadId can pass the handle and
+  // project name straight through instead of first resolving them to a projectId.
+  handle?: string;
+  projectName?: string;
 }
 
 interface V1RunClaimBody {
@@ -533,6 +559,7 @@ function writeProblem(
   status: number,
   title: string,
   detail: string,
+  code?: string,
 ): void {
   reply.code(status).type("application/problem+json").send({
     type: "https://tools.ietf.org/html/rfc7807#section-3.1",
@@ -540,6 +567,7 @@ function writeProblem(
     status,
     detail,
     instance: reply.request.url,
+    ...(code ? { code } : {}),
   });
 }
 
@@ -854,7 +882,7 @@ async function resolveProjectAccess(projectId: string, user: AuthUser): Promise<
 async function resolveProjectAccessByHandle(
   handle: string,
   projectName: string,
-  user: AuthUser,
+  user: AuthUser | null,
 ): Promise<V1ProjectAccessRow | null> {
   const normalizedHandle = handle.trim();
   const normalizedProjectName = projectName.trim();
@@ -881,7 +909,7 @@ async function resolveProjectAccessByHandle(
      WHERE lower(owner_u.handle) = lower($1)
        AND p.name = $2
      LIMIT 1`,
-    [normalizedHandle, normalizedProjectName, user.id],
+    [normalizedHandle, normalizedProjectName, user?.id ?? null],
   );
   if (result.rowCount === 0) return null;
 
@@ -951,49 +979,33 @@ type ThreadAccessResolution =
   | { kind: "ambiguous_project_thread_id" }
   | { kind: "not_found" };
 
+type ProjectThreadScope =
+  | { kind: "id"; projectId: string }
+  | { kind: "slug"; handle: string; projectName: string };
+
+function parseProjectSlugScope(scope: V1ThreadScopeQuerystring): ProjectThreadScope | null {
+  const handle = typeof scope.handle === "string" ? scope.handle.trim() : "";
+  const projectName = typeof scope.projectName === "string" ? scope.projectName.trim() : "";
+  if (!handle || !projectName) return null;
+  return { kind: "slug", handle, projectName };
+}
+
 async function resolveThreadAccessByProjectThreadId(
   projectThreadId: number,
   viewerUserId: string | null,
-  projectId: string | null,
+  scope: ProjectThreadScope | null,
 ): Promise<ThreadAccessResolution> {
-  if (projectId) {
-    const result = await query<V1ThreadRow>(
-      `SELECT *
-         FROM (
-           SELECT
-             t.id,
-             t.project_id,
-             t.title,
-             t.description,
-             t.status,
-             t.created_at,
-             t.updated_at,
-             t.source_thread_id,
-             COALESCE(NULLIF(pc.role::text, ''),
-               CASE
-                 WHEN p.owner_id = CAST($2 AS uuid) THEN 'Owner'
-                 WHEN p.visibility = 'public' THEN 'Viewer'
-                 ELSE NULL
-               END
-             )::text AS access_role
-           FROM threads t
-           JOIN projects p ON p.id = t.project_id
-           LEFT JOIN project_collaborators pc
-             ON pc.project_id = p.id
-            AND pc.user_id = CAST($2 AS uuid)
-           WHERE t.project_thread_id = $1
-             AND t.project_id = $3
-             AND p.is_archived = false
-         ) accessible
-        WHERE accessible.access_role IS NOT NULL
-        LIMIT 1`,
-      [projectThreadId, viewerUserId, projectId],
-    );
-
-    if (result.rowCount === 0) return { kind: "not_found" };
-    return { kind: "found", thread: result.rows[0] };
+  const params: unknown[] = [projectThreadId, viewerUserId];
+  let scopeClause = "";
+  if (scope?.kind === "id") {
+    scopeClause = `AND t.project_id = $${params.push(scope.projectId)}`;
+  } else if (scope?.kind === "slug") {
+    scopeClause = `AND p.name = $${params.push(scope.projectName)}
+             AND owner_u.handle = $${params.push(scope.handle)}`;
   }
 
+  // Unscoped lookups take two rows so an id that matches several accessible
+  // projects can be reported as ambiguous rather than resolving arbitrarily.
   const result = await query<V1ThreadRow>(
     `SELECT *
        FROM (
@@ -1015,15 +1027,17 @@ async function resolveThreadAccessByProjectThreadId(
            )::text AS access_role
          FROM threads t
          JOIN projects p ON p.id = t.project_id
+         JOIN users owner_u ON owner_u.id = p.owner_id
          LEFT JOIN project_collaborators pc
            ON pc.project_id = p.id
           AND pc.user_id = CAST($2 AS uuid)
          WHERE t.project_thread_id = $1
            AND p.is_archived = false
+           ${scopeClause}
        ) accessible
       WHERE accessible.access_role IS NOT NULL
-      LIMIT 2`,
-    [projectThreadId, viewerUserId],
+      LIMIT ${scope ? 1 : 2}`,
+    params,
   );
 
   const rowCount = result.rowCount ?? 0;
@@ -1044,7 +1058,7 @@ function parseV1ThreadRouteId(raw: string): V1ThreadRouteId | null {
 async function resolveThreadAccessByRequestParam(
   rawThreadId: string,
   viewerUserId: string | null,
-  rawProjectId: unknown,
+  scope: V1ThreadScopeQuerystring,
 ): Promise<ThreadAccessResolution> {
   const parsed = parseV1ThreadRouteId(rawThreadId);
   if (!parsed) return { kind: "invalid_thread_id" };
@@ -1054,9 +1068,13 @@ async function resolveThreadAccessByRequestParam(
     return byUuid ? { kind: "found", thread: byUuid } : { kind: "not_found" };
   }
 
-  const parsedProjectId = parseOptionalProjectId(rawProjectId);
+  const parsedProjectId = parseOptionalProjectId(scope.projectId);
   if (parsedProjectId === "invalid") return { kind: "invalid_project_id" };
-  return resolveThreadAccessByProjectThreadId(parsed.projectThreadId, viewerUserId, parsedProjectId);
+  return resolveThreadAccessByProjectThreadId(
+    parsed.projectThreadId,
+    viewerUserId,
+    parsedProjectId ? { kind: "id", projectId: parsedProjectId } : parseProjectSlugScope(scope),
+  );
 }
 
 function writeThreadAccessFailure(reply: FastifyReply, result: Exclude<ThreadAccessResolution, { kind: "found" }>): void {
@@ -1080,12 +1098,6 @@ function writeThreadAccessFailure(reply: FastifyReply, result: Exclude<ThreadAcc
   notFoundProblem(reply, "Thread not found");
 }
 
-
-function buildPaginationFromQuery(rawPage: unknown, rawPageSize: unknown): V1ListCursor {
-  const page = parsePositiveInt(rawPage, 1, 1, Number.MAX_SAFE_INTEGER);
-  const pageSize = parsePositiveInt(rawPageSize, 50, 1, 200);
-  return { page, pageSize, nextCursor: String(page + 1) };
-}
 
 async function getThreadSystemId(threadId: string): Promise<string | null> {
   const result = await query<{ system_id: string }>(
@@ -1322,17 +1334,360 @@ async function publishThreadMatrixChanged(threadId: string, user: AuthUser, aggr
   }).catch(() => undefined);
 }
 
+// ============================================================================
+// Matrix mutation helpers
+//
+// Every matrix write goes through begin_action(), which forks the thread's
+// current system and returns the fork's id; writes land in the fork, and the
+// fork becomes current on COMMIT. commit_action_empty() drops the fork when a
+// write turned out to be a no-op, so a redundant request does not leave an
+// empty system behind.
+// ============================================================================
+
+interface V1MatrixDocumentRow {
+  hash: string;
+  kind: string;
+  title: string;
+  language: string;
+  text: string;
+  source_type: string;
+  source_url: string | null;
+  source_external_id: string | null;
+  source_metadata: Record<string, unknown> | null;
+  source_connected_user_id: string | null;
+}
+
+function toV1MatrixDocument(row: V1MatrixDocumentRow) {
+  return {
+    hash: row.hash,
+    kind: row.kind,
+    title: row.title,
+    language: row.language,
+    text: row.text,
+    sourceType: row.source_type,
+    sourceUrl: row.source_url,
+    sourceExternalId: row.source_external_id,
+    sourceMetadata: row.source_metadata,
+    sourceConnectedUserId: row.source_connected_user_id,
+  };
+}
+
+const MATRIX_DOCUMENT_COLUMNS = `hash, kind::text AS kind, title, language, text,
+  source_type::text AS source_type, source_url, source_external_id,
+  source_metadata, source_connected_user_id`;
+
+async function beginMatrixAction(
+  client: PoolClient,
+  threadId: string,
+  actionId: string,
+  actionType: "Edit" | "Import",
+  title: string,
+): Promise<string> {
+  const result = await client.query<{ output_system_id: string }>(
+    `SELECT begin_action($1, $2, $3::action_type, $4) AS output_system_id`,
+    [threadId, actionId, actionType, title],
+  );
+  const outputSystemId = result.rows[0]?.output_system_id;
+  if (!outputSystemId) throw new Error("Failed to create action output system");
+  return outputSystemId;
+}
+
+async function getDocumentTitleByHash(
+  client: PoolClient,
+  systemId: string,
+  hash: string,
+): Promise<string | null> {
+  const result = await client.query<{ title: string }>(
+    `SELECT title FROM documents WHERE system_id = $1 AND hash = $2 LIMIT 1`,
+    [systemId, hash],
+  );
+  return result.rows[0]?.title ?? null;
+}
+
+async function getNodeNameById(
+  client: PoolClient,
+  systemId: string,
+  nodeId: string,
+): Promise<string | null> {
+  const result = await client.query<{ name: string }>(
+    `SELECT name FROM nodes WHERE system_id = $1 AND id = $2 LIMIT 1`,
+    [systemId, nodeId],
+  );
+  return result.rows[0]?.name ?? null;
+}
+
+async function getNodeNamesByDocumentHash(
+  client: PoolClient,
+  systemId: string,
+  docHash: string,
+): Promise<string[]> {
+  const result = await client.query<{ name: string }>(
+    `SELECT DISTINCT n.name
+       FROM matrix_refs mr
+       JOIN nodes n ON n.system_id = mr.system_id AND n.id = mr.node_id
+      WHERE mr.system_id = $1 AND mr.doc_hash = $2
+      ORDER BY n.name`,
+    [systemId, docHash],
+  );
+  return result.rows.map((row) => row.name);
+}
+
+async function insertSystemActionMessage(
+  client: PoolClient,
+  threadId: string,
+  actionId: string,
+  content: string,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO messages (id, thread_id, action_id, role, content, position)
+     VALUES ($1, $2, $3, 'System'::message_role, $4, 1)`,
+    [randomUUID(), threadId, actionId, content],
+  );
+}
+
+async function getActionMessages(
+  client: PoolClient,
+  threadId: string,
+  actionId: string,
+): Promise<V1ChatMessage[]> {
+  const result = await client.query<{
+    id: string;
+    action_id: string;
+    action_type: string;
+    action_position: number;
+    role: "User" | "Assistant" | "System";
+    content: string;
+    created_at: Date;
+  }>(
+    `SELECT m.id, m.action_id, m.role, m.content, m.created_at,
+            a.position AS action_position, a.type::text AS action_type
+       FROM messages m
+       JOIN actions a ON a.thread_id = m.thread_id AND a.id = m.action_id
+      WHERE m.thread_id = $1 AND m.action_id = $2
+      ORDER BY m.position`,
+    [threadId, actionId],
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    actionId: row.action_id,
+    role: row.role,
+    actionType: row.action_type,
+    actionPosition: row.action_position,
+    content: row.content,
+    createdAt: row.created_at.toISOString(),
+  }));
+}
+
+async function getSystemRootNodeId(systemId: string, client: PoolClient): Promise<string | null> {
+  const result = await client.query<{ root_node_id: string }>(
+    `SELECT root_node_id FROM systems WHERE id = $1`,
+    [systemId],
+  );
+  return result.rows[0]?.root_node_id ?? null;
+}
+
+// A system prompt is modelled as a Prompt ref on the system root node under one
+// reserved concern. The concern is created on demand because it is an internal
+// slot rather than something a user adds to the matrix.
+async function validateSystemPromptAttachment(
+  client: PoolClient,
+  systemId: string,
+  attachment: { nodeId: string; concerns: string[]; docHash: string },
+): Promise<
+  | { valid: true; payload: MatrixRefPayload }
+  | { valid: false; error: string }
+> {
+  const rootNodeId = await getSystemRootNodeId(systemId, client);
+  if (!rootNodeId) return { valid: false, error: "Unable to resolve system root node" };
+  if (attachment.concerns.length !== 1) {
+    return { valid: false, error: "System prompts require exactly one concern" };
+  }
+  if (attachment.concerns[0] !== SYSTEM_PROMPT_CONCERN) {
+    return { valid: false, error: `System prompts require concern "${SYSTEM_PROMPT_CONCERN}"` };
+  }
+  if (attachment.nodeId !== rootNodeId) {
+    return { valid: false, error: "System prompts can only be attached to the system root node" };
+  }
+
+  await client.query(
+    `INSERT INTO concerns (system_id, name, position, is_baseline, scope)
+     VALUES ($1, $2, COALESCE((SELECT MAX(position) FROM concerns WHERE system_id = $1), -1) + 1, false, 'system')
+     ON CONFLICT DO NOTHING`,
+    [systemId, SYSTEM_PROMPT_CONCERN],
+  );
+
+  return {
+    valid: true,
+    payload: {
+      nodeId: rootNodeId,
+      concern: SYSTEM_PROMPT_CONCERN,
+      concerns: [SYSTEM_PROMPT_CONCERN],
+      refType: "Prompt",
+      docHash: attachment.docHash,
+    },
+  };
+}
+
+async function getSystemPromptsForSystem(systemId: string): Promise<V1SystemPromptRow[]> {
+  const result = await query<V1SystemPromptRow>(
+    `SELECT d.hash, d.text, d.title
+       FROM systems s
+       JOIN matrix_refs mr
+         ON mr.system_id = s.id
+        AND mr.node_id = s.root_node_id
+        AND mr.ref_type = 'Prompt'::ref_type
+        AND mr.concern = $2
+       JOIN documents d ON d.system_id = mr.system_id AND d.hash = mr.doc_hash
+      WHERE s.id = $1
+      ORDER BY d.created_at DESC`,
+    [systemId, SYSTEM_PROMPT_CONCERN],
+  );
+
+  const deduped = new Map<string, V1SystemPromptRow>();
+  for (const row of result.rows) {
+    if (!deduped.has(row.hash)) deduped.set(row.hash, row);
+  }
+  return Array.from(deduped.values());
+}
+
+async function getSystemPromptMetadata(systemId: string): Promise<{
+  systemPrompt: string | null;
+  systemPromptTitle: string | null;
+  systemPrompts: V1SystemPromptRow[];
+}> {
+  const systemPrompts = await getSystemPromptsForSystem(systemId);
+  return {
+    systemPrompt: systemPrompts[0]?.text ?? null,
+    systemPromptTitle: systemPrompts[0]?.title ?? null,
+    systemPrompts,
+  };
+}
+
+// The cells the client needs after a mutation: only the ones it touched.
+// Artifacts are always empty here, matching the thread read, which does not
+// surface them either -- returning them only on mutation would make a cell gain
+// artifacts on edit and lose them again on the next refresh.
+async function getMatrixCellsForNode(
+  systemId: string,
+  nodeId: string,
+  concerns: string[],
+): Promise<V1ThreadMatrixNodeCell[]> {
+  const wanted = Array.from(new Set(concerns.map((concern) => concern.trim()).filter(Boolean)));
+  if (wanted.length === 0) return [];
+
+  const result = await query<{
+    node_id: string;
+    concern: string;
+    hash: string;
+    title: string;
+    kind: string;
+    language: string;
+    source_type: string;
+    source_url: string | null;
+    source_external_id: string | null;
+    source_metadata: Record<string, unknown> | null;
+    source_connected_user_id: string | null;
+    ref_type: string;
+  }>(
+    `SELECT mr.node_id, mr.concern, d.hash, d.title, d.kind::text AS kind, d.language,
+            d.source_type::text AS source_type, d.source_url, d.source_external_id,
+            d.source_metadata, d.source_connected_user_id, mr.ref_type::text AS ref_type
+       FROM matrix_refs mr
+       JOIN documents d ON d.system_id = mr.system_id AND d.hash = mr.doc_hash
+      WHERE mr.system_id = $1
+        AND mr.node_id = $2
+        AND mr.concern = ANY($3::text[])
+        AND mr.ref_type IN ('Document'::ref_type, 'Skill'::ref_type)
+      ORDER BY mr.ref_type, d.title`,
+    [systemId, nodeId, wanted],
+  );
+
+  // Every requested concern gets a cell, including the ones that came back with
+  // no rows: the client replaces cells by key, so an emptied cell has to be
+  // returned as empty rather than omitted, or the removed document lingers.
+  const byConcern = new Map<string, V1ThreadMatrixNodeCell>(
+    wanted.map((concern) => [concern, { nodeId, concern, docs: [], artifacts: [] }]),
+  );
+  for (const row of result.rows) {
+    byConcern.get(row.concern)?.docs.push({
+      hash: row.hash,
+      title: row.title,
+      kind: row.kind,
+      language: row.language,
+      sourceType: row.source_type,
+      sourceUrl: row.source_url,
+      sourceExternalId: row.source_external_id,
+      sourceMetadata: row.source_metadata,
+      sourceConnectedUserId: row.source_connected_user_id,
+      refType: row.ref_type,
+    });
+  }
+
+  return wanted.map((concern) => byConcern.get(concern)).filter((cell): cell is V1ThreadMatrixNodeCell => Boolean(cell));
+}
+
+// The client accepts either `cell` (single) or `cells`; send both when there is
+// exactly one so either read path works.
+function buildMatrixRefResponse(
+  systemId: string,
+  cells: V1ThreadMatrixNodeCell[],
+  messages: V1ChatMessage[],
+  systemPrompt?: Awaited<ReturnType<typeof getSystemPromptMetadata>>,
+) {
+  return {
+    systemId,
+    ...(cells.length === 1 ? { cell: cells[0] } : {}),
+    cells,
+    messages,
+    ...(systemPrompt ?? {}),
+  };
+}
+
+async function rollbackQuietly(client: PoolClient): Promise<void> {
+  try {
+    await client.query("ROLLBACK");
+  } catch {
+    // The connection is being released either way; a failed rollback here would
+    // mask the error that caused it.
+  }
+}
+
+function isForeignKeyViolation(error: unknown): boolean {
+  return error instanceof Error && (error as { code?: string }).code === "23503";
+}
+
+const OPTIONAL_AUTH_READ_ROUTES = new Set([
+  "/projects",
+  "/threads",
+  "/threads/:threadId",
+  "/threads/:threadId/matrix/documents",
+  "/threads/:threadId/matrix/documents/:hash",
+]);
+
 export async function v1Routes(app: FastifyInstance) {
+  app.setErrorHandler((error: FastifyError, req, reply) => {
+    if (error.code === "FST_ERR_CTP_BODY_TOO_LARGE" && req.url.includes("/projects/imports/openship")) {
+      writeProblem(
+        reply,
+        413,
+        "OpenShip import wire payload is too large",
+        "The encoded JSON request exceeds the 96 MiB import limit.",
+        "openship_wire_too_large",
+      );
+      return;
+    }
+    reply.send(error);
+  });
   app.addHook("preHandler", async (req, reply) => {
     const routeUrl = req.routeOptions.url;
+    // Reads a signed-out visitor may make against a public project. The document
+    // routes belong here because bodies used to ride along with the thread read:
+    // leaving them out would make a public thread unreadable without an account.
     const isOptionalReadRoute = req.method === "GET"
       && (
-        routeUrl === "/projects"
-        || routeUrl === "/v1/projects"
-        || routeUrl === "/threads"
-        || routeUrl === "/v1/threads"
-        || routeUrl === "/threads/:threadId"
-        || routeUrl === "/v1/threads/:threadId"
+        (routeUrl != null && OPTIONAL_AUTH_READ_ROUTES.has(routeUrl.replace(/^\/v1/, "")))
+        || routeUrl?.includes("/projects/:handle/:projectName/openship") === true
       );
 
     if (isOptionalReadRoute) {
@@ -1344,10 +1699,81 @@ export async function v1Routes(app: FastifyInstance) {
     if (reply.sent) return;
   });
 
+  app.addHook("preHandler", async (req, reply) => {
+    if (["GET", "HEAD", "OPTIONS"].includes(req.method) || reply.sent) return;
+    const params = (req.params ?? {}) as Record<string, string | undefined>;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const querystring = (req.query ?? {}) as Record<string, unknown>;
+    let legacy = false;
+    if (params.threadId) {
+      const result = await query<{ spec_version: string }>(
+        `SELECT s.spec_version FROM systems s WHERE s.id=thread_current_system($1)`,
+        [params.threadId],
+      );
+      legacy = result.rows[0]?.spec_version === "openship/v1";
+      if (!result.rows[0] && /^\d+$/.test(params.threadId)) {
+        // A numeric thread id needs the request's project scope to resolve, and
+        // that scope is either a project id or a handle/projectName pair.
+        const scoped = typeof querystring.projectId === "string"
+          ? await query<{ spec_version: string }>(
+              `SELECT s.spec_version FROM threads t
+               JOIN systems s ON s.id=thread_current_system(t.id)
+               WHERE t.project_id=$1 AND t.project_thread_id=$2 LIMIT 1`,
+              [querystring.projectId, Number(params.threadId)],
+            )
+          : typeof querystring.handle === "string" && typeof querystring.projectName === "string"
+            ? await query<{ spec_version: string }>(
+                `SELECT s.spec_version FROM threads t
+                 JOIN projects p ON p.id=t.project_id
+                 JOIN users owner_u ON owner_u.id=p.owner_id
+                 JOIN systems s ON s.id=thread_current_system(t.id)
+                 WHERE owner_u.handle=$1 AND p.name=$2 AND t.project_thread_id=$3 LIMIT 1`,
+                [querystring.handle, querystring.projectName, Number(params.threadId)],
+              )
+            : null;
+        legacy = scoped?.rows[0]?.spec_version === "openship/v1";
+      }
+    } else if (params.runId) {
+      const result = await query<{ spec_version: string }>(
+        `SELECT s.spec_version FROM agent_runs ar
+         JOIN systems s ON s.id=thread_current_system(ar.thread_id) WHERE ar.id=$1`,
+        [params.runId],
+      );
+      legacy = result.rows[0]?.spec_version === "openship/v1";
+    } else if (typeof body.projectId === "string") {
+      const result = await query<{ spec_version: string }>(
+        `SELECT s.spec_version FROM threads t
+         JOIN systems s ON s.id=thread_current_system(t.id)
+         WHERE t.project_id=$1 AND t.source_thread_id IS NULL ORDER BY t.project_thread_id LIMIT 1`,
+        [body.projectId],
+      );
+      legacy = result.rows[0]?.spec_version === "openship/v1";
+    } else if (params.handle && params.projectName) {
+      const result = await query<{ spec_version: string }>(
+        `SELECT s.spec_version FROM projects p
+         JOIN users u ON u.id=p.owner_id
+         JOIN threads t ON t.project_id=p.id AND t.source_thread_id IS NULL
+         JOIN systems s ON s.id=thread_current_system(t.id)
+         WHERE u.handle=$1 AND p.name=$2 LIMIT 1`,
+        [params.handle, params.projectName],
+      );
+      legacy = result.rows[0]?.spec_version === "openship/v1";
+    }
+    if (legacy) {
+      writeProblem(
+        reply,
+        409,
+        "Legacy OpenShip project is view-only",
+        "Re-import this origin or create an OpenShip 1.0 project before making changes.",
+        "legacy_openship_project",
+      );
+    }
+  });
+
   app.get<{ Querystring: { page?: number; pageSize?: number; name?: string } }>(
     "/projects",
     { config: { anonymousCache: true } },
-    async (req, reply) => {
+    async (req) => {
       const viewerUserId = getOptionalAuthUser(req)?.id ?? null;
       const page = parsePositiveInt(req.query.page, 1, 1, Number.MAX_SAFE_INTEGER);
       const pageSize = parsePositiveInt(req.query.pageSize, 50, 1, 200);
@@ -1532,7 +1958,7 @@ export async function v1Routes(app: FastifyInstance) {
         );
         await client.query(
           `INSERT INTO systems (id, name, root_node_id, metadata, spec_version)
-           VALUES ($1, $2, $3, $4::jsonb, 'openship/v1')`,
+           VALUES ($1, $2, $3, $4::jsonb, '1.0')`,
           [
             systemId,
             name,
@@ -1576,6 +2002,14 @@ export async function v1Routes(app: FastifyInstance) {
             bundleFiles: templateBundleFiles,
           });
         }
+        const empty = emptySources({ name, description: description ?? `Anticlodex project ${name}.` });
+        const verified = validateSources(empty.manifest, empty.bundle);
+        await persistSources(client, verified);
+        await client.query(
+          `INSERT INTO system_sources (system_id,current_digest,upstream_base_digest)
+           VALUES ($1,$2,$2)`,
+          [systemId, verified.manifest.digest],
+        );
 
         await client.query("COMMIT");
         inTransaction = false;
@@ -1601,6 +2035,129 @@ export async function v1Routes(app: FastifyInstance) {
     },
   );
 
+  app.post<{
+    Body: {
+      origin?: string;
+      name?: string;
+      description?: string;
+      visibility?: V1ProjectVisibility;
+      discovery?: unknown;
+      snapshot?: unknown;
+    };
+  }>(
+    "/projects/imports/openship",
+    { bodyLimit: 96 * 1024 * 1024 },
+    async (req, reply) => {
+      const user = (req as V1AuthRequest).auth;
+      const name = req.body?.name?.trim();
+      const description = req.body?.description?.trim();
+      const visibility = req.body?.visibility ?? "private";
+      if (!name || !/^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?$/.test(name) || name.length > 80) {
+        return writeProblem(reply, 400, "Invalid project name", "Use a valid project name of at most 80 characters.");
+      }
+      if (!description) return writeProblem(reply, 400, "Invalid description", "description is required.");
+      if (visibility !== "public" && visibility !== "private") {
+        return writeProblem(reply, 400, "Invalid visibility", "visibility must be public or private.");
+      }
+
+      let origin: string;
+      let discovery: ReturnType<typeof validateDiscovery>;
+      let imported: ReturnType<typeof verifyImportSnapshot>;
+      try {
+        origin = normalizeOpenShipOrigin(req.body.origin ?? "", { allowLoopbackHttp: true });
+        discovery = validateDiscovery(req.body.discovery);
+        imported = verifyImportSnapshot(req.body.snapshot);
+        if (
+          discovery.project.name !== imported.verified.manifest.project.name
+          || discovery.project.description !== imported.verified.manifest.project.description
+        ) {
+          throw new OpenShipValidationError(
+            "$.discovery.project",
+            "must match the imported Sources project metadata",
+            "inconsistent_discovery",
+          );
+        }
+        if (imported.kind === "systems" && !discovery.capabilities.systems) {
+          throw new OpenShipValidationError(
+            "$.discovery.capabilities.systems",
+            "must advertise the imported Systems document",
+            "inconsistent_discovery",
+          );
+        }
+      } catch (error) {
+        const detail = error instanceof OpenShipValidationError ? error.message : error instanceof Error ? error.message : String(error);
+        return writeProblem(
+          reply,
+          error instanceof OpenShipValidationError && error.code === "source_too_large" ? 413 : 422,
+          "Invalid OpenShip import",
+          detail,
+          error instanceof OpenShipValidationError ? error.code : "invalid_openship_import",
+        );
+      }
+
+      const existing = await query<{ id: string }>(
+        "SELECT id FROM projects WHERE owner_id=$1 AND name=$2",
+        [user.id, name],
+      );
+      if ((existing.rowCount ?? 0) > 0) {
+        return writeProblem(reply, 409, "Duplicate project", "A project with this name already exists.");
+      }
+
+      const projectId = randomUUID();
+      const threadId = randomUUID();
+      const systemId = randomUUID();
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          `INSERT INTO projects (id,name,description,visibility,owner_id) VALUES ($1,$2,$3,$4,$5)`,
+          [projectId, name, description, visibility, user.id],
+        );
+        await populateOpenShipSystem(client, {
+          systemId,
+          fallbackName: discovery.project.name,
+          origin,
+          discovery,
+          verified: imported.verified,
+          systems: imported.systems,
+        });
+        await client.query(
+          "SELECT create_thread($1,$2,$3,$4,$5,$6)",
+          [threadId, projectId, user.id, systemId, "OpenShip Import", `Imported ${origin}`],
+        );
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        req.log.error({ error, origin }, "OpenShip import failed");
+        if ((error as { code?: string }).code === "23505") {
+          return writeProblem(reply, 409, "Duplicate project", "A project with this name already exists.");
+        }
+        return writeProblem(reply, 422, "OpenShip import failed", error instanceof Error ? error.message : String(error));
+      } finally {
+        client.release();
+      }
+
+      return reply.code(201).send({
+        id: projectId,
+        name,
+        description,
+        visibility,
+        accessRole: "Owner",
+        ownerHandle: user.handle,
+        createdAt: new Date().toISOString(),
+        threadCount: 1,
+        threads: [{ id: threadId, title: "OpenShip Import", description: `Imported ${origin}`, status: "open", updatedAt: new Date().toISOString() }],
+        openship: {
+          origin,
+          digest: imported.verified.manifest.digest,
+          capability: imported.kind,
+          files: imported.verified.manifest.totals.files,
+          bytes: imported.verified.manifest.totals.bytes,
+        },
+      });
+    },
+  );
+
   app.get<{ Querystring: { name?: string } }>(
     "/projects/check-name",
     async (req, reply) => {
@@ -1614,6 +2171,183 @@ export async function v1Routes(app: FastifyInstance) {
         [user.id, name],
       );
       return { available: exists.rowCount === 0 };
+    },
+  );
+
+  app.get<{ Params: { handle: string; projectName: string } }>(
+    "/projects/:handle/:projectName/openship",
+    async (req, reply) => {
+      const user = getOptionalAuthUser(req);
+      const project = await resolveProjectAccessByHandle(req.params.handle, req.params.projectName, user);
+      if (!project) return writeProblem(reply, 404, "Project not found", "Project not found or access denied.");
+      const systemId = await resolveProjectSystemId(project.project_id);
+      if (!systemId) return writeProblem(reply, 404, "Project system not found", "Project system not found.");
+      const result = await query<{
+        spec_version: string; origin: string | null; current_digest: string | null;
+        upstream_base_digest: string | null; discovery: Record<string, unknown> | null;
+        total_files: string | null; total_bytes: string | null;
+      }>(
+        `SELECT s.spec_version,ss.origin,ss.current_digest,ss.upstream_base_digest,ss.discovery,
+                snap.total_files::text,snap.total_bytes::text
+         FROM systems s
+         LEFT JOIN system_sources ss ON ss.system_id=s.id
+         LEFT JOIN source_snapshots snap ON snap.digest=ss.current_digest
+         WHERE s.id=$1`,
+        [systemId],
+      );
+      const row = result.rows[0];
+      const files = row.current_digest
+        ? await query<{ path: string; encoding: string; file_type: string; media_type: string; target: string | null; size: string }>(
+          `SELECT path,encoding,file_type,media_type,target,size::text FROM source_files
+           WHERE snapshot_digest=$1 ORDER BY path COLLATE "C"`,
+          [row.current_digest],
+        )
+        : { rows: [] };
+      return {
+        version: row.spec_version,
+        legacy: row.spec_version !== "1.0",
+        origin: row.origin,
+        currentDigest: row.current_digest,
+        upstreamBaseDigest: row.upstream_base_digest,
+        discovery: row.discovery,
+        validationState: row.spec_version === "1.0" && row.current_digest ? "verified" : "legacy",
+        capabilities: (row.discovery?.capabilities as Record<string, unknown> | undefined) ?? null,
+        totals: row.total_files === null ? null : { files: Number(row.total_files), bytes: Number(row.total_bytes) },
+        files: files.rows.map((file) => ({ ...file, size: Number(file.size) })),
+      };
+    },
+  );
+
+  app.get<{ Params: { handle: string; projectName: string } }>(
+    "/projects/:handle/:projectName/openship/upstream.json",
+    async (req, reply) => {
+      const user = getOptionalAuthUser(req);
+      const project = await resolveProjectAccessByHandle(req.params.handle, req.params.projectName, user);
+      if (!project) return writeProblem(reply, 404, "Project not found", "Project not found or access denied.");
+      const systemId = await resolveProjectSystemId(project.project_id);
+      if (!systemId) return writeProblem(reply, 404, "Project system not found", "Project system not found.");
+      const result = await query<{ upstream_base_digest: string }>(
+        "SELECT upstream_base_digest FROM system_sources WHERE system_id=$1",
+        [systemId],
+      );
+      const digest = result.rows[0]?.upstream_base_digest;
+      if (!digest) return writeProblem(reply, 409, "OpenShip upstream unavailable", "This project has no upstream base snapshot.");
+      try { return await exportSourcesDigest(pool, digest); }
+      catch (error) { return writeProblem(reply, 409, "OpenShip upstream unavailable", error instanceof Error ? error.message : String(error)); }
+    },
+  );
+
+  app.get<{ Params: { handle: string; projectName: string } }>(
+    "/projects/:handle/:projectName/openship/remote-changes",
+    async (req, reply) => {
+      const user = getOptionalAuthUser(req);
+      const project = await resolveProjectAccessByHandle(req.params.handle, req.params.projectName, user);
+      if (!project) return writeProblem(reply, 404, "Project not found", "Project not found or access denied.");
+      const systemId = await resolveProjectSystemId(project.project_id);
+      if (!systemId) return writeProblem(reply, 404, "Project system not found", "Project system not found.");
+      const result = await query<{
+        remote_change_id: string | null; base_digest: string; result_digest: string; submit_url: string;
+        status_url: string | null; candidate_origin: string | null; status: string; phase: string | null; response: unknown;
+      }>(
+        `SELECT id,remote_change_id,base_digest,result_digest,submit_url,status_url,candidate_origin,
+                status,phase,response,created_at,updated_at
+         FROM remote_changes WHERE system_id=$1 ORDER BY created_at DESC`,
+        [systemId],
+      );
+      return { changes: result.rows.map((row) => ({
+        remoteChangeId: row.remote_change_id,
+        baseDigest: row.base_digest,
+        resultDigest: row.result_digest,
+        submitUrl: row.submit_url,
+        statusUrl: row.status_url,
+        candidateOrigin: row.candidate_origin,
+        status: row.status,
+        phase: row.phase,
+        response: row.response,
+      })) };
+    },
+  );
+
+  app.post<{
+    Params: { handle: string; projectName: string };
+    Body: {
+      remoteChangeId?: string | null; baseDigest?: string; resultDigest?: string; submitUrl?: string;
+      statusUrl?: string | null; candidateOrigin?: string | null; status?: string; phase?: string | null;
+      response?: unknown;
+    };
+  }>(
+    "/projects/:handle/:projectName/openship/remote-changes",
+    async (req, reply) => {
+      const user = (req as V1AuthRequest).auth;
+      const project = await resolveProjectAccessByHandle(req.params.handle, req.params.projectName, user);
+      if (!project || !canEdit(project.access_role)) return writeProblem(reply, 404, "Project not found", "Project not found or access denied.");
+      const systemId = await resolveProjectSystemId(project.project_id);
+      if (!systemId) return writeProblem(reply, 404, "Project system not found", "Project system not found.");
+      const status = req.body?.status;
+      if (!status || !["pending", "processing", "ready", "rejected", "failed", "unsupported"].includes(status)) {
+        return writeProblem(reply, 400, "Invalid Changes status", "status must be pending, processing, ready, rejected, failed, or unsupported.");
+      }
+      if (!req.body.baseDigest || !req.body.resultDigest || !req.body.submitUrl) {
+        return writeProblem(reply, 400, "Invalid Changes record", "baseDigest, resultDigest, and submitUrl are required.");
+      }
+      const record = await query(
+        `INSERT INTO remote_changes (
+           system_id,remote_change_id,base_digest,result_digest,submit_url,status_url,candidate_origin,status,phase,response
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
+         RETURNING *`,
+        [
+          systemId,
+          req.body.remoteChangeId?.trim() || null,
+          req.body.baseDigest,
+          req.body.resultDigest,
+          req.body.submitUrl,
+          req.body.statusUrl ?? null,
+          req.body.candidateOrigin ?? null,
+          status,
+          req.body.phase ?? null,
+          JSON.stringify(req.body.response ?? {}),
+        ],
+      );
+      return reply.code(201).send(record.rows[0]);
+    },
+  );
+
+  app.get<{ Params: { handle: string; projectName: string } }>(
+    "/projects/:handle/:projectName/openship/manifest.json",
+    async (req, reply) => {
+      const user = getOptionalAuthUser(req);
+      const project = await resolveProjectAccessByHandle(req.params.handle, req.params.projectName, user);
+      if (!project) return writeProblem(reply, 404, "Project not found", "Project not found or access denied.");
+      const systemId = await resolveProjectSystemId(project.project_id);
+      if (!systemId) return writeProblem(reply, 404, "Project system not found", "Project system not found.");
+      try { return (await exportSources(pool, systemId)).manifest; }
+      catch (error) { return writeProblem(reply, 409, "OpenShip export unavailable", error instanceof Error ? error.message : String(error)); }
+    },
+  );
+
+  app.get<{ Params: { handle: string; projectName: string } }>(
+    "/projects/:handle/:projectName/openship/bundle.json",
+    async (req, reply) => {
+      const user = getOptionalAuthUser(req);
+      const project = await resolveProjectAccessByHandle(req.params.handle, req.params.projectName, user);
+      if (!project) return writeProblem(reply, 404, "Project not found", "Project not found or access denied.");
+      const systemId = await resolveProjectSystemId(project.project_id);
+      if (!systemId) return writeProblem(reply, 404, "Project system not found", "Project system not found.");
+      try { return (await exportSources(pool, systemId)).bundle; }
+      catch (error) { return writeProblem(reply, 409, "OpenShip export unavailable", error instanceof Error ? error.message : String(error)); }
+    },
+  );
+
+  app.get<{ Params: { handle: string; projectName: string } }>(
+    "/projects/:handle/:projectName/openship/system.json",
+    async (req, reply) => {
+      const user = getOptionalAuthUser(req);
+      const project = await resolveProjectAccessByHandle(req.params.handle, req.params.projectName, user);
+      if (!project) return writeProblem(reply, 404, "Project not found", "Project not found or access denied.");
+      const systemId = await resolveProjectSystemId(project.project_id);
+      if (!systemId) return writeProblem(reply, 404, "Project system not found", "Project system not found.");
+      try { return await exportSystems(pool, systemId); }
+      catch (error) { return writeProblem(reply, 409, "OpenShip export unavailable", error instanceof Error ? error.message : String(error)); }
     },
   );
 
@@ -2203,7 +2937,7 @@ export async function v1Routes(app: FastifyInstance) {
   app.get<{ Querystring: { projectId?: string; page?: number; pageSize?: number } }>(
     "/threads",
     { config: { anonymousCache: true } },
-    async (req, reply) => {
+    async (req) => {
       const viewerUserId = getOptionalAuthUser(req)?.id ?? null;
       const page = parsePositiveInt(req.query.page, 1, 1, Number.MAX_SAFE_INTEGER);
       const pageSize = parsePositiveInt(req.query.pageSize, 50, 1, 200);
@@ -2392,13 +3126,18 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const viewerUserId = getOptionalAuthUser(req)?.id ?? null;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, viewerUserId, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, viewerUserId, req.query);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
       }
       const thread = threadAccess.thread;
       const resolvedThreadId = thread.id;
+
+      // thread_current_system() cannot change within a request, so it is resolved
+      // once here and passed down. Three getThreadSystemId() calls and two inline
+      // subqueries previously resolved the same value five times per read.
+      const systemId = await getThreadSystemId(resolvedThreadId);
 
       const [projectRow, messagesResult, systemTopology, systemEdges, matrixCells, concernRows, matrixDocumentsRows] = await Promise.all([
         query<{ project_name: string; owner_handle: string; creator_handle: string }>(
@@ -2441,39 +3180,37 @@ export async function v1Routes(app: FastifyInstance) {
         query<{ id: string; name: string; kind: string; parent_id: string | null; metadata: Record<string, unknown> }>(
          `SELECT n.id, n.name, n.kind::text AS kind, n.parent_id, n.metadata
             FROM nodes n
-           WHERE n.system_id = (SELECT thread_current_system($1))
+           WHERE n.system_id = $1
            ORDER BY n.id`,
-          [resolvedThreadId],
+          [systemId],
         ),
         query<{ id: string; from_node_id: string; to_node_id: string; type: string; metadata: Record<string, unknown> }>(
           `SELECT e.id, e.from_node_id, e.to_node_id, e.type::text AS type, e.metadata
            FROM edges e
-           WHERE e.system_id = (SELECT thread_current_system($1))
+           WHERE e.system_id = $1
            ORDER BY e.id`,
-          [resolvedThreadId],
+          [systemId],
         ),
-        getThreadSystemId(resolvedThreadId)
-          .then((systemId) => systemId ? loadThreadMatrix(systemId) : Promise.resolve([] as V1ThreadMatrixNodeCell[])),
-        getThreadSystemId(resolvedThreadId).then(async (systemId) =>
-          systemId
-            ? query<V1ProjectThreadConcernRow>(
-                `SELECT name, position FROM concerns WHERE system_id = $1 ORDER BY position`,
-                [systemId],
-              ).then((result) => result.rows)
-            : Promise.resolve([] as V1ProjectThreadConcernRow[]),
-        ),
-        getThreadSystemId(resolvedThreadId).then(async (systemId) =>
-          systemId
-            ? query<V1ProjectThreadDocumentRow>(
-                `SELECT hash, kind::text AS kind, title, language, text, source_type::text AS source_type,
-                        source_url, source_external_id, source_metadata, source_connected_user_id
-                 FROM documents
-                 WHERE system_id = $1
-                 ORDER BY created_at, hash`,
-                [systemId],
-              ).then((result) => result.rows)
-            : Promise.resolve([] as V1ProjectThreadDocumentRow[]),
-        ),
+        systemId ? loadThreadMatrix(systemId) : Promise.resolve([] as V1ThreadMatrixNodeCell[]),
+        systemId
+          ? query<V1ProjectThreadConcernRow>(
+              `SELECT name, position FROM concerns WHERE system_id = $1 ORDER BY position`,
+              [systemId],
+            ).then((result) => result.rows)
+          : Promise.resolve([] as V1ProjectThreadConcernRow[]),
+        // `text` is deliberately not selected here: documents are the largest rows
+        // in the schema and most are not open when a thread loads. Bodies are
+        // fetched per hash from GET /threads/:threadId/matrix/documents/:hash.
+        systemId
+          ? query<V1ThreadDocumentMetadataRow>(
+              `SELECT hash, kind::text AS kind, title, language, source_type::text AS source_type,
+                      source_url, source_external_id, source_metadata, source_connected_user_id
+               FROM documents
+               WHERE system_id = $1
+               ORDER BY created_at, hash`,
+              [systemId],
+            ).then((result) => result.rows)
+          : Promise.resolve([] as V1ThreadDocumentMetadataRow[]),
       ]);
 
       const project = projectRow.rows[0];
@@ -2509,7 +3246,6 @@ export async function v1Routes(app: FastifyInstance) {
             kind: document.kind,
             title: document.title,
             language: document.language,
-            text: document.text,
             sourceType: document.source_type,
             sourceUrl: document.source_url,
             sourceExternalId: document.source_external_id,
@@ -2541,7 +3277,7 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -2609,7 +3345,7 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -2631,7 +3367,7 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -2697,12 +3433,626 @@ export async function v1Routes(app: FastifyInstance) {
     },
   );
 
+  // GET /threads/:threadId returns document metadata without `text`. These two
+  // routes serve the bodies: one document at a time when the UI opens it, and a
+  // hash list when the document picker runs a full-text search. Documents are
+  // content-addressed, so a body fetched by hash is immutable and caches forever.
+  app.get<{ Params: { threadId: string; hash: string }; Querystring: V1ThreadScopeQuerystring }>(
+    "/threads/:threadId/matrix/documents/:hash",
+    { config: { anonymousCache: true } },
+    async (req, reply) => {
+      const viewerUserId = getOptionalAuthUser(req)?.id ?? null;
+      const threadAccess = await resolveThreadAccessByRequestParam(req.params.threadId, viewerUserId, req.query);
+      if (threadAccess.kind !== "found") {
+        writeThreadAccessFailure(reply, threadAccess);
+        return;
+      }
+
+      const systemId = await getThreadSystemId(threadAccess.thread.id);
+      if (!systemId) return notFoundProblem(reply, "Document not found");
+
+      const result = await query<V1ProjectThreadDocumentRow>(
+        `SELECT hash, kind::text AS kind, title, language, text, source_type::text AS source_type,
+                source_url, source_external_id, source_metadata, source_connected_user_id
+         FROM documents
+         WHERE system_id = $1 AND hash = $2`,
+        [systemId, req.params.hash],
+      );
+
+      const document = result.rows[0];
+      if (!document) return notFoundProblem(reply, "Document not found");
+
+      return {
+        document: {
+          hash: document.hash,
+          kind: document.kind,
+          title: document.title,
+          language: document.language,
+          text: document.text,
+          sourceType: document.source_type,
+          sourceUrl: document.source_url,
+          sourceExternalId: document.source_external_id,
+          sourceMetadata: document.source_metadata,
+          sourceConnectedUserId: document.source_connected_user_id,
+        },
+      };
+    },
+  );
+
+  app.get<{ Params: { threadId: string }; Querystring: V1ThreadScopeQuerystring & { q?: string } }>(
+    "/threads/:threadId/matrix/documents",
+    { config: { anonymousCache: true } },
+    async (req, reply) => {
+      const viewerUserId = getOptionalAuthUser(req)?.id ?? null;
+      const threadAccess = await resolveThreadAccessByRequestParam(req.params.threadId, viewerUserId, req.query);
+      if (threadAccess.kind !== "found") {
+        writeThreadAccessFailure(reply, threadAccess);
+        return;
+      }
+
+      const search = typeof req.query.q === "string" ? req.query.q.trim() : "";
+      if (!search) return { hashes: [] };
+
+      const systemId = await getThreadSystemId(threadAccess.thread.id);
+      if (!systemId) return { hashes: [] };
+
+      const result = await query<{ hash: string }>(
+        `SELECT hash FROM documents
+          WHERE system_id = $1 AND text ILIKE $2 ESCAPE '${SQL_LIKE_ESCAPE_CHARACTER}'
+          ORDER BY created_at, hash
+          LIMIT 200`,
+        [systemId, toLikeContainsPattern(search)],
+      );
+
+      return { hashes: result.rows.map((row) => row.hash) };
+    },
+  );
+
+  // Attach a document to one or more matrix cells.
+  app.post<{ Params: { threadId: string }; Querystring: V1ThreadScopeQuerystring; Body: unknown }>(
+    "/threads/:threadId/matrix/refs",
+    async (req, reply) => {
+      const user = (req as V1AuthRequest).auth;
+      const threadAccess = await resolveThreadAccessByRequestParam(req.params.threadId, user.id, req.query);
+      if (threadAccess.kind !== "found") {
+        writeThreadAccessFailure(reply, threadAccess);
+        return;
+      }
+      const thread = threadAccess.thread;
+      if (!canEdit(thread.access_role)) return forbiddenProblem(reply);
+
+      let payload = normalizeMatrixRefBody(req.body);
+      if (!payload) {
+        return writeProblem(reply, 400, "Invalid matrix reference", "nodeId, docHash, refType and at least one concern are required.");
+      }
+
+      const client = await pool.connect();
+      let inTransaction = false;
+      let actionMessages: V1ChatMessage[] = [];
+
+      try {
+        await client.query("BEGIN");
+        inTransaction = true;
+
+        const actionId = randomUUID();
+        const outputSystemId = await beginMatrixAction(client, thread.id, actionId, "Edit", "Matrix doc add");
+
+        if (payload.refType === "Prompt") {
+          const validation = await validateSystemPromptAttachment(client, outputSystemId, payload);
+          if (!validation.valid) {
+            await rollbackQuietly(client);
+            inTransaction = false;
+            return writeProblem(reply, 400, "Invalid system prompt", validation.error);
+          }
+          payload = validation.payload;
+        }
+
+        let changed = 0;
+        for (const concern of payload.concerns) {
+          const inserted = await client.query(
+            `INSERT INTO matrix_refs (system_id, node_id, concern, ref_type, doc_hash)
+             VALUES ($1, $2, $3, $4::ref_type, $5)
+             ON CONFLICT DO NOTHING`,
+            [outputSystemId, payload.nodeId, concern, payload.refType, payload.docHash],
+          );
+          changed += inserted.rowCount ?? 0;
+        }
+
+        if (changed === 0) {
+          await client.query("SELECT commit_action_empty($1, $2)", [thread.id, actionId]);
+        } else {
+          const title = await getDocumentTitleByHash(client, outputSystemId, payload.docHash) ?? payload.docHash;
+          const nodeName = await getNodeNameById(client, outputSystemId, payload.nodeId);
+          await insertSystemActionMessage(client, thread.id, actionId, buildDocumentAddSummary(title, nodeName));
+          actionMessages = await getActionMessages(client, thread.id, actionId);
+        }
+
+        await client.query("COMMIT");
+        inTransaction = false;
+      } catch (error: unknown) {
+        if (inTransaction) await rollbackQuietly(client);
+        if (isForeignKeyViolation(error)) {
+          return writeProblem(reply, 400, "Invalid matrix reference", "Unknown node, concern, or document.");
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
+
+      const systemId = await getThreadSystemId(thread.id);
+      if (!systemId) return writeProblem(reply, 500, "System missing", "Thread has no current system");
+
+      await publishThreadMatrixChanged(thread.id, user, thread.id);
+      return buildMatrixRefResponse(
+        systemId,
+        await getMatrixCellsForNode(systemId, payload.nodeId, payload.concerns),
+        actionMessages,
+        payload.refType === "Prompt" ? await getSystemPromptMetadata(systemId) : undefined,
+      );
+    },
+  );
+
+  // Detach a document from one or more matrix cells.
+  app.delete<{ Params: { threadId: string }; Querystring: V1ThreadScopeQuerystring; Body: unknown }>(
+    "/threads/:threadId/matrix/refs",
+    async (req, reply) => {
+      const user = (req as V1AuthRequest).auth;
+      const threadAccess = await resolveThreadAccessByRequestParam(req.params.threadId, user.id, req.query);
+      if (threadAccess.kind !== "found") {
+        writeThreadAccessFailure(reply, threadAccess);
+        return;
+      }
+      const thread = threadAccess.thread;
+      if (!canEdit(thread.access_role)) return forbiddenProblem(reply);
+
+      let payload = normalizeMatrixRefBody(req.body);
+      if (!payload) {
+        return writeProblem(reply, 400, "Invalid matrix reference", "nodeId, docHash, refType and at least one concern are required.");
+      }
+
+      const client = await pool.connect();
+      let inTransaction = false;
+      let actionMessages: V1ChatMessage[] = [];
+
+      try {
+        await client.query("BEGIN");
+        inTransaction = true;
+
+        const actionId = randomUUID();
+        const outputSystemId = await beginMatrixAction(client, thread.id, actionId, "Edit", "Matrix doc remove");
+
+        if (payload.refType === "Prompt") {
+          const validation = await validateSystemPromptAttachment(client, outputSystemId, payload);
+          if (!validation.valid) {
+            await rollbackQuietly(client);
+            inTransaction = false;
+            return writeProblem(reply, 400, "Invalid system prompt", validation.error);
+          }
+          payload = validation.payload;
+        }
+
+        // The title has to be read before the ref goes, or the summary message
+        // would have nothing left to name.
+        const title = await getDocumentTitleByHash(client, outputSystemId, payload.docHash) ?? payload.docHash;
+        const nodeName = await getNodeNameById(client, outputSystemId, payload.nodeId);
+
+        let changed = 0;
+        for (const concern of payload.concerns) {
+          const deleted = await client.query(
+            `DELETE FROM matrix_refs
+              WHERE system_id = $1
+                AND node_id = $2
+                AND concern_hash = md5($3)
+                AND concern = $3
+                AND ref_type = $4::ref_type
+                AND doc_hash = $5`,
+            [outputSystemId, payload.nodeId, concern, payload.refType, payload.docHash],
+          );
+          changed += deleted.rowCount ?? 0;
+        }
+
+        if (changed === 0) {
+          await client.query("SELECT commit_action_empty($1, $2)", [thread.id, actionId]);
+        } else {
+          await insertSystemActionMessage(client, thread.id, actionId, buildDocumentRemoveSummary(title, nodeName));
+          actionMessages = await getActionMessages(client, thread.id, actionId);
+        }
+
+        await client.query("COMMIT");
+        inTransaction = false;
+      } catch (error: unknown) {
+        if (inTransaction) await rollbackQuietly(client);
+        throw error;
+      } finally {
+        client.release();
+      }
+
+      const systemId = await getThreadSystemId(thread.id);
+      if (!systemId) return writeProblem(reply, 500, "System missing", "Thread has no current system");
+
+      await publishThreadMatrixChanged(thread.id, user, thread.id);
+      return buildMatrixRefResponse(
+        systemId,
+        await getMatrixCellsForNode(systemId, payload.nodeId, payload.concerns),
+        actionMessages,
+        payload.refType === "Prompt" ? await getSystemPromptMetadata(systemId) : undefined,
+      );
+    },
+  );
+
+  // Create a document -- authored locally, or imported from a connected
+  // provider -- and optionally attach it to a cell in the same action.
+  app.post<{ Params: { threadId: string }; Querystring: V1ThreadScopeQuerystring; Body: unknown }>(
+    "/threads/:threadId/matrix/documents",
+    async (req, reply) => {
+      const user = (req as V1AuthRequest).auth;
+      const threadAccess = await resolveThreadAccessByRequestParam(req.params.threadId, user.id, req.query);
+      if (threadAccess.kind !== "found") {
+        writeThreadAccessFailure(reply, threadAccess);
+        return;
+      }
+      const thread = threadAccess.thread;
+      if (!canEdit(thread.access_role)) return forbiddenProblem(reply);
+
+      const payload = normalizeMatrixDocumentCreateBody(req.body);
+      if (!payload) {
+        return writeProblem(reply, 400, "Invalid document", "A local document needs kind, title, name and description; an imported one needs kind and sourceUrl.");
+      }
+      if (payload.kind === "Prompt" && payload.sourceType !== "local") {
+        return writeProblem(reply, 400, "Invalid system prompt", "System prompts must be local documents.");
+      }
+      if (payload.kind === "Prompt" && !payload.attach) {
+        return writeProblem(reply, 400, "Invalid system prompt", "System prompts require an attach payload.");
+      }
+
+      let sourceUrl: string | null = null;
+      let sourceExternalId: string | null = null;
+      let sourceMetadata: Record<string, unknown> | null = null;
+      let sourceConnectedUserId: string | null = null;
+      let title = payload.title ?? "";
+      let text: string;
+
+      if (payload.sourceType === "local") {
+        text = buildDocumentText({
+          name: payload.name ?? "",
+          description: payload.description ?? "",
+          body: payload.body ?? "",
+        });
+      } else {
+        try {
+          const remote = await fetchRemoteDocument(user.id, payload.sourceType, payload.sourceUrl ?? "");
+          sourceUrl = remote.sourceUrl;
+          sourceExternalId = remote.sourceExternalId;
+          sourceMetadata = remote.sourceMetadata;
+          sourceConnectedUserId = user.id;
+          title = remote.title || title || "Imported document";
+          text = remote.text;
+        } catch (error: unknown) {
+          if (isIntegrationReconnectError(error)) {
+            req.log.warn({ threadId: thread.id, provider: error.provider, status: error.status }, "Document import blocked by integration state");
+            return writeProblem(
+              reply,
+              409,
+              "Integration required",
+              `Reconnect ${error.provider} to import this document.`,
+              "integration_reconnect_required",
+            );
+          }
+          if (isNotionApiError(error)) {
+            req.log.warn({ threadId: thread.id, status: error.status, reason: error.reason }, "Notion document import failed");
+            return writeProblem(reply, error.status >= 500 ? 502 : 400, "Import failed", error.reason, "notion_import_failed");
+          }
+          req.log.error({ threadId: thread.id, sourceType: payload.sourceType, err: error }, "Document import failed");
+          throw error;
+        }
+      }
+
+      const hash = computeDocumentHash({ kind: payload.kind, title, language: payload.language, body: text });
+
+      const client = await pool.connect();
+      let inTransaction = false;
+      let actionMessages: V1ChatMessage[] = [];
+      let attach = payload.attach;
+      let insertedDocument: V1MatrixDocumentRow | null = null;
+
+      try {
+        await client.query("BEGIN");
+        inTransaction = true;
+
+        const actionId = randomUUID();
+        const isImport = payload.sourceType !== "local";
+        const outputSystemId = await beginMatrixAction(
+          client,
+          thread.id,
+          actionId,
+          isImport ? "Import" : "Edit",
+          isImport ? "Matrix doc import" : "Matrix doc create",
+        );
+
+        if (payload.kind === "Prompt" && attach) {
+          const validation = await validateSystemPromptAttachment(client, outputSystemId, {
+            nodeId: attach.nodeId,
+            concerns: attach.concerns,
+            docHash: attach.docHash ?? hash,
+          });
+          if (!validation.valid) {
+            await rollbackQuietly(client);
+            inTransaction = false;
+            return writeProblem(reply, 400, "Invalid system prompt", validation.error);
+          }
+          attach = { ...validation.payload, docHash: hash };
+        }
+
+        const insertResult = await client.query<V1MatrixDocumentRow>(
+          `INSERT INTO documents (
+             hash, system_id, kind, title, language, text, source_type,
+             source_url, source_external_id, source_metadata, source_connected_user_id
+           )
+           VALUES ($1, $2, $3::doc_kind, $4, $5, $6, $7::doc_source_type, $8, $9, $10, $11)
+           ON CONFLICT (system_id, hash) DO NOTHING
+           RETURNING ${MATRIX_DOCUMENT_COLUMNS}`,
+          [
+            hash, outputSystemId, payload.kind, title, payload.language, text,
+            payload.sourceType, sourceUrl, sourceExternalId, sourceMetadata, sourceConnectedUserId,
+          ],
+        );
+        insertedDocument = insertResult.rows[0] ?? null;
+
+        let attachedRefs = 0;
+        if (attach) {
+          for (const concern of attach.concerns) {
+            const inserted = await client.query(
+              `INSERT INTO matrix_refs (system_id, node_id, concern, ref_type, doc_hash)
+               VALUES ($1, $2, $3, $4::ref_type, $5)
+               ON CONFLICT DO NOTHING`,
+              [outputSystemId, attach.nodeId, concern, attach.refType, hash],
+            );
+            attachedRefs += inserted.rowCount ?? 0;
+          }
+        }
+
+        // Re-creating an identical document that is already attached changes
+        // nothing, and the forked system is dropped rather than kept empty.
+        if ((insertResult.rowCount ?? 0) === 0 && attachedRefs === 0) {
+          await client.query("SELECT commit_action_empty($1, $2)", [thread.id, actionId]);
+        } else {
+          const nodeName = attach ? await getNodeNameById(client, outputSystemId, attach.nodeId) : null;
+          await insertSystemActionMessage(
+            client,
+            thread.id,
+            actionId,
+            buildDocumentCreateSummary(title, payload.sourceType, nodeName, attachedRefs > 0),
+          );
+          actionMessages = await getActionMessages(client, thread.id, actionId);
+        }
+
+        await client.query("COMMIT");
+        inTransaction = false;
+      } catch (error: unknown) {
+        if (inTransaction) await rollbackQuietly(client);
+        if (isForeignKeyViolation(error)) {
+          return writeProblem(reply, 400, "Invalid attachment", "Unknown node or concern.");
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
+
+      const systemId = await getThreadSystemId(thread.id);
+      if (!systemId) return writeProblem(reply, 500, "System missing", "Thread has no current system");
+
+      await publishThreadMatrixChanged(thread.id, user, thread.id);
+      const document = insertedDocument
+        ? toV1MatrixDocument(insertedDocument)
+        : {
+            hash,
+            kind: payload.kind as string,
+            title,
+            language: payload.language,
+            text,
+            sourceType: payload.sourceType as string,
+            sourceUrl,
+            sourceExternalId,
+            sourceMetadata,
+            sourceConnectedUserId,
+          };
+      const cells = attach ? await getMatrixCellsForNode(systemId, attach.nodeId, attach.concerns) : [];
+
+      return {
+        systemId,
+        document,
+        ...(cells.length === 1 ? { cell: cells[0] } : {}),
+        ...(cells.length > 0 ? { cells } : {}),
+        messages: actionMessages,
+        ...(payload.kind === "Prompt" ? await getSystemPromptMetadata(systemId) : {}),
+      };
+    },
+  );
+
+  // Edit a document. Documents are content-addressed, so an edit inserts a new
+  // row under a new hash and repoints every ref at it; the old row stays, which
+  // is what makes an earlier action's view of the document still resolvable.
+  app.patch<{ Params: { threadId: string; hash: string }; Querystring: V1ThreadScopeQuerystring; Body: unknown }>(
+    "/threads/:threadId/matrix/documents/:hash",
+    async (req, reply) => {
+      const user = (req as V1AuthRequest).auth;
+      const threadAccess = await resolveThreadAccessByRequestParam(req.params.threadId, user.id, req.query);
+      if (threadAccess.kind !== "found") {
+        writeThreadAccessFailure(reply, threadAccess);
+        return;
+      }
+      const thread = threadAccess.thread;
+      if (!canEdit(thread.access_role)) return forbiddenProblem(reply);
+
+      const documentHash = req.params.hash.trim();
+      const payload = normalizeMatrixDocumentReplaceBody(req.body);
+      if (!documentHash || !payload) {
+        return writeProblem(reply, 400, "Invalid document patch", "Supply at least one of title, name, description, language or body.");
+      }
+
+      const client = await pool.connect();
+      let inTransaction = false;
+      let actionMessages: V1ChatMessage[] = [];
+
+      try {
+        await client.query("BEGIN");
+        inTransaction = true;
+
+        const actionId = randomUUID();
+        const outputSystemId = await beginMatrixAction(client, thread.id, actionId, "Edit", "Matrix doc replace");
+
+        const existingResult = await client.query<V1MatrixDocumentRow>(
+          `SELECT ${MATRIX_DOCUMENT_COLUMNS} FROM documents WHERE system_id = $1 AND hash = $2`,
+          [outputSystemId, documentHash],
+        );
+        const existing = existingResult.rows[0];
+        if (!existing) {
+          await rollbackQuietly(client);
+          inTransaction = false;
+          return notFoundProblem(reply, "Document not found");
+        }
+
+        const isPromptDocument = existing.kind === "Prompt";
+        const isRemoteDocument = existing.source_type !== "local";
+
+        if (isPromptDocument && isRemoteDocument) {
+          await rollbackQuietly(client);
+          inTransaction = false;
+          return writeProblem(reply, 400, "Invalid system prompt", "Prompt documents must be local.");
+        }
+
+        if (isPromptDocument) {
+          const rootNodeId = await getSystemRootNodeId(outputSystemId, client);
+          if (!rootNodeId) {
+            await rollbackQuietly(client);
+            inTransaction = false;
+            return writeProblem(reply, 500, "System missing", "Unable to resolve system root node");
+          }
+          const strayRefs = await client.query(
+            `SELECT 1 FROM matrix_refs
+              WHERE system_id = $1 AND doc_hash = $2
+                AND ref_type = 'Prompt'::ref_type AND node_id <> $3
+              LIMIT 1`,
+            [outputSystemId, documentHash, rootNodeId],
+          );
+          if ((strayRefs.rowCount ?? 0) > 0) {
+            await rollbackQuietly(client);
+            inTransaction = false;
+            return writeProblem(reply, 400, "Invalid system prompt", "Prompt documents must remain attached to the system root node.");
+          }
+        }
+
+        // A remote document's text is a snapshot of what the provider returned.
+        // Editing it here would make the local copy disagree with its source
+        // while still claiming to be that source; refreshing it is a re-import.
+        if (isRemoteDocument && (payload.body !== undefined || payload.name !== undefined || payload.description !== undefined)) {
+          await rollbackQuietly(client);
+          inTransaction = false;
+          return writeProblem(
+            reply,
+            400,
+            "Imported document is read-only",
+            "Imported documents cannot be edited as markdown. Re-import to refresh the snapshot.",
+          );
+        }
+
+        const nextTitle = payload.title ?? existing.title;
+        const nextLanguage = payload.language ?? existing.language;
+        const parsedExisting = isRemoteDocument ? null : parseDocumentText(existing.text);
+        const existingName = parsedExisting?.name && isValidDocumentName(parsedExisting.name)
+          ? parsedExisting.name
+          : deriveDocumentName(nextTitle);
+        const nextText = isRemoteDocument
+          ? existing.text
+          : buildDocumentText({
+              name: payload.name ?? existingName,
+              description: payload.description ?? parsedExisting?.description ?? "",
+              body: payload.body ?? parsedExisting?.body ?? "",
+            });
+        const nextHash = computeDocumentHash({
+          kind: existing.kind as DocKind,
+          title: nextTitle,
+          language: nextLanguage,
+          body: nextText,
+        });
+
+        const insertResult = await client.query<V1MatrixDocumentRow>(
+          `INSERT INTO documents (
+             hash, system_id, kind, title, language, text, source_type,
+             source_url, source_external_id, source_metadata, source_connected_user_id, supersedes
+           )
+           VALUES ($1, $2, $3::doc_kind, $4, $5, $6, $7::doc_source_type, $8, $9, $10, $11, $12)
+           ON CONFLICT (system_id, hash) DO NOTHING
+           RETURNING ${MATRIX_DOCUMENT_COLUMNS}`,
+          [
+            nextHash, outputSystemId, existing.kind, nextTitle, nextLanguage, nextText,
+            existing.source_type, existing.source_url, existing.source_external_id,
+            existing.source_metadata, existing.source_connected_user_id, existing.hash,
+          ],
+        );
+
+        const updatedRefs = await client.query(
+          `UPDATE matrix_refs SET doc_hash = $3 WHERE system_id = $1 AND doc_hash = $2`,
+          [outputSystemId, existing.hash, nextHash],
+        );
+        const replacedRefs = updatedRefs.rowCount ?? 0;
+
+        if ((insertResult.rowCount ?? 0) === 0 && replacedRefs === 0) {
+          await client.query("SELECT commit_action_empty($1, $2)", [thread.id, actionId]);
+        } else {
+          const nodeNames = await getNodeNamesByDocumentHash(client, outputSystemId, nextHash);
+          await insertSystemActionMessage(
+            client,
+            thread.id,
+            actionId,
+            buildDocumentModifySummary(existing.title, nextTitle, nodeNames),
+          );
+          actionMessages = await getActionMessages(client, thread.id, actionId);
+        }
+
+        await client.query("COMMIT");
+        inTransaction = false;
+
+        const systemId = await getThreadSystemId(thread.id);
+        if (!systemId) return writeProblem(reply, 500, "System missing", "Thread has no current system");
+
+        await publishThreadMatrixChanged(thread.id, user, thread.id);
+        return {
+          systemId,
+          oldHash: existing.hash,
+          document: insertResult.rows[0]
+            ? toV1MatrixDocument(insertResult.rows[0])
+            : {
+                hash: nextHash,
+                kind: existing.kind,
+                title: nextTitle,
+                language: nextLanguage,
+                text: nextText,
+                sourceType: existing.source_type,
+                sourceUrl: existing.source_url,
+                sourceExternalId: existing.source_external_id,
+                sourceMetadata: existing.source_metadata,
+                sourceConnectedUserId: existing.source_connected_user_id,
+              },
+          replacedRefs,
+          messages: actionMessages,
+          ...(isPromptDocument ? await getSystemPromptMetadata(systemId) : {}),
+        };
+      } catch (error: unknown) {
+        if (inTransaction) await rollbackQuietly(client);
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+  );
+
   app.patch<{ Params: { threadId: string }; Querystring: V1ThreadScopeQuerystring; Body: V1MatrixPatchBody }>(
     "/threads/:threadId/matrix",
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -2770,7 +4120,7 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -2809,7 +4159,7 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -2909,7 +4259,7 @@ export async function v1Routes(app: FastifyInstance) {
       }
 
 
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -3027,6 +4377,19 @@ export async function v1Routes(app: FastifyInstance) {
       }
 
       const runnerId = req.body?.runnerId?.trim() || `desktop-${randomUUID()}`;
+      const runSpec = await query<{ spec_version: string }>(
+        `SELECT s.spec_version FROM systems s WHERE s.id=thread_current_system($1)`,
+        [run.thread_id],
+      );
+      if (runSpec.rows[0]?.spec_version === "1.0" && runnerId.startsWith("desktop-")) {
+        return writeProblem(
+          reply,
+          409,
+          "OpenShip 1.0 run is server-managed",
+          "The API runner owns the isolated project/control workspace for OpenShip 1.0 runs.",
+          "openship_server_runner_required",
+        );
+      }
       const claimed = await claimAgentRunById(runId, runnerId);
       if (!claimed) {
         return writeProblem(reply, 409, "Run unavailable", "Run is not available for claiming");

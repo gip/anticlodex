@@ -8,7 +8,6 @@ import {
   snapshotOpenShipBundle,
   type AgentRuntimeMessage,
 } from "@acx/agent-runtime";
-import { getValidAccessToken, logout } from "./auth.js";
 
 function normalizeApiUrl(raw: string): string {
   const trimmed = raw.trim().replace(/\/+$/, "");
@@ -19,7 +18,7 @@ function normalizeApiUrl(raw: string): string {
 const API_URL = normalizeApiUrl(import.meta.env.VITE_API_URL ?? "http://localhost:3001");
 const DEFAULT_RUNNER_ID = process.env.ACX_AGENT_RUNNER_ID ?? "desktop-runner";
 const AGENTS_BOOTSTRAP_FILE_NAME = "AGENTS.md";
-const OPENSHIP_SPEC_WORKSPACE_FILE_PATH = "skills/openship-specs-v1/SKILL.md";
+const OPENSHIP_SPEC_WORKSPACE_FILE_PATH = "control/skills/openship/SKILL.md";
 
 interface AssistantRunClaimResponse {
   runId: string;
@@ -79,6 +78,8 @@ interface AssistantRunResultResponse {
   }>;
   threadState?: unknown;
 }
+
+type AccessTokenProvider = () => Promise<string>;
 
 async function collectOpenShipBundleFiles(bundleDir: string): Promise<OpenShipBundleFile[]> {
   const entries = await readdir(bundleDir, { withFileTypes: true });
@@ -257,47 +258,30 @@ function getMessageType(message: AgentRuntimeMessage): string {
   return typeof rawType === "string" ? String(rawType) : "unknown";
 }
 
-async function getWorkspaceAccessToken(): Promise<string> {
-  const token = await getValidAccessToken();
-  if (!token) {
-    throw new Error("Not authenticated");
-  }
-  return token;
-}
-
 async function apiRequest<T>(
+  getAccessToken: AccessTokenProvider,
   path: string,
   options: Omit<RequestInit, "headers"> & { body?: string | object | null } = {},
 ): Promise<T> {
-  const request = async (forceRefresh = false) => {
-    const token = await getValidAccessToken({ forceRefresh });
-    if (!token) {
-      throw new Error("Not authenticated");
-    }
+  const accessToken = await getAccessToken();
+  const response = await fetch(`${API_URL}${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      ...(typeof options.headers === "object" && options.headers !== null
+        ? options.headers as Record<string, string>
+        : {}),
+    },
+    body:
+      typeof options.body === "string"
+        ? options.body
+        : options.body === undefined || options.body === null
+          ? undefined
+          : JSON.stringify(options.body),
+  });
 
-    return fetch(`${API_URL}${path}`, {
-      ...options,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        ...(typeof options.headers === "object" && options.headers !== null
-          ? options.headers as Record<string, string>
-          : {}),
-      },
-      body:
-        typeof options.body === "string"
-          ? options.body
-          : options.body === undefined || options.body === null
-            ? undefined
-            : JSON.stringify(options.body),
-    });
-  };
-
-  let response = await request();
   if (response.status === 401) {
-    response = await request(true);
-    if (response.status === 401) {
-      await logout();
-    }
+    throw new Error("Authentication expired during the local run. Sign in and retry.");
   }
 
   if (!response.ok) {
@@ -347,13 +331,12 @@ function buildRunSummary(changes: AssistantRunCompleteRequest["changes"]): strin
 }
 
 async function completeRun(
-  handle: string,
-  projectName: string,
-  threadId: string,
+  getAccessToken: AccessTokenProvider,
   runId: string,
   payload: AssistantRunCompleteRequest,
 ) {
   await apiRequest<{ runId: string }>(
+    getAccessToken,
     `/assistant-runs/${encodeURIComponent(runId)}/complete`,
     {
       method: "POST",
@@ -363,6 +346,7 @@ async function completeRun(
   );
 
   return await apiRequest<AssistantRunResultResponse>(
+    getAccessToken,
     `/assistant-runs/${encodeURIComponent(runId)}`,
     { method: "GET" },
   );
@@ -374,14 +358,14 @@ export async function startAssistantRunLocal(payload: {
   threadId: string;
   projectId?: string;
   runId: string;
-}): Promise<unknown> {
+}, getAccessToken: AccessTokenProvider): Promise<unknown> {
   const toError = (error: unknown): string =>
     error instanceof Error ? error.message : typeof error === "string" ? error : "Failed to execute local agent run.";
-  await getWorkspaceAccessToken();
   const runnerId = `${DEFAULT_RUNNER_ID}-${randomUUID()}`;
   let claimPayload: AssistantRunClaimResponse;
   try {
     claimPayload = await apiRequest<AssistantRunClaimResponse>(
+      getAccessToken,
       `/assistant-runs/${encodeURIComponent(payload.runId)}/claim`,
       {
         method: "POST",
@@ -394,6 +378,7 @@ export async function startAssistantRunLocal(payload: {
       if (message.includes("HTTP 409") || message.includes("Run is not available for claiming")) {
         try {
           return await apiRequest<unknown>(
+            getAccessToken,
             `/assistant-runs/${encodeURIComponent(payload.runId)}`,
             { method: "GET" },
           );
@@ -421,6 +406,7 @@ export async function startAssistantRunLocal(payload: {
   if (claimPayload.status !== "running" && claimPayload.status !== "queued") {
     try {
       return await apiRequest<unknown>(
+        getAccessToken,
         `/assistant-runs/${encodeURIComponent(payload.runId)}`,
         { method: "GET" },
       );
@@ -436,6 +422,7 @@ export async function startAssistantRunLocal(payload: {
   let descriptor: OpenShipBundleDescriptor;
   try {
     descriptor = await apiRequest<OpenShipBundleDescriptor>(
+      getAccessToken,
       bundlePath,
       {
         method: "GET",
@@ -551,7 +538,7 @@ export async function startAssistantRunLocal(payload: {
         status: "failed",
         reason: snapshotFailure,
       });
-      return await completeRun(payload.handle, payload.projectName, payload.threadId, payload.runId, {
+      return await completeRun(getAccessToken, payload.runId, {
         status: "failed",
         messages: [...messages, snapshotFailure],
         changes,
@@ -562,7 +549,7 @@ export async function startAssistantRunLocal(payload: {
   }
 
   try {
-    const completionResult = await completeRun(payload.handle, payload.projectName, payload.threadId, payload.runId, {
+    const completionResult = await completeRun(getAccessToken, payload.runId, {
       status: runResult.status,
       messages,
       changes,

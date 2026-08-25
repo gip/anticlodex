@@ -1,0 +1,29 @@
+{
+  "openship": "1.0",
+  "capability": "systems",
+  "source": {
+    "manifest": {
+      "openship": "1.0",
+      "capability": "sources",
+      "digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "project": { "name": "Broken ownership", "description": "A Systems node with non-conformant ownership." },
+      "totals": { "files": 0, "bytes": 0 },
+      "files": []
+    },
+    "bundle": {
+      "openship": "1.0",
+      "capability": "sources",
+      "digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "files": {}
+    }
+  },
+  "system": {
+    "id": "broken-ownership",
+    "name": "Broken ownership",
+    "rootNodeId": "s.root",
+    "nodes": [
+      { "id": "s.root", "kind": "Root", "name": "Broken ownership", "metadata": { "ownership": "partner" } }
+    ],
+    "edges": []
+  }
+}

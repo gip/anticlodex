@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    # The matrix mutation routes are covered by tests that talk to a real
+    # database. Without one they skip silently, which is how they went unnoticed
+    # as 404s for several releases, so CI provides one.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      OPENSHIP_DB_TEST: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Migrate test database
+        run: pnpm --filter @acx/api migrate
+
+      # Invoked per-package rather than via `pnpm test`, whose `pretest` hook
+      # shells out to the `openship` CLI that is not installed on the runner.
+      - name: Test
+        run: pnpm --filter @acx/api --filter @acx/ui test
+
+      - name: Build api
+        run: pnpm build:api
+
+      - name: Build web
+        run: pnpm build:web
+
+      - name: Build desktop
+        run: pnpm build:desktop

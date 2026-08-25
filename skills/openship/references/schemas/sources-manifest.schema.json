@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openship.dev/schemas/sources-manifest.schema.json",
+  "title": "OpenShip Sources v1 manifest",
+  "type": "object",
+  "required": ["openship", "capability", "digest", "project", "totals", "files"],
+  "properties": {
+    "openship": { "const": "1.0" },
+    "capability": { "const": "sources" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "digest": { "$ref": "#/$defs/digest" },
+    "parent": { "$ref": "#/$defs/digest" },
+    "project": {
+      "type": "object",
+      "required": ["name", "description"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "homepage": { "type": "string", "format": "uri" },
+        "repository": { "type": "string", "format": "uri" },
+        "license": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "commit": {
+      "type": "object",
+      "required": ["sha", "dirty"],
+      "properties": {
+        "sha": { "type": "string", "minLength": 1 },
+        "ref": { "type": "string" },
+        "committedAt": { "type": "string", "format": "date-time" },
+        "dirty": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "stack": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "structure": { "type": "array", "items": { "type": "object", "required": ["path", "purpose"], "properties": { "path": { "type": "string" }, "purpose": { "type": "string" } }, "additionalProperties": true } },
+    "setup": { "type": "object", "additionalProperties": true },
+    "env": { "type": "array", "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" }, "uniqueItems": true },
+    "ignore": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "ignoreNames": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "fileSet": { "type": "string", "minLength": 1 },
+    "totals": {
+      "type": "object",
+      "required": ["files", "bytes"],
+      "properties": {
+        "files": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "files": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/file" }
+    }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "path": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*//)[^\\u0000]+$" },
+    "file": {
+      "type": "object",
+      "required": ["path", "size", "sha256", "encoding", "mediaType", "type"],
+      "properties": {
+        "path": { "$ref": "#/$defs/path" },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "encoding": { "enum": ["utf-8", "base64"] },
+        "mediaType": { "type": "string", "minLength": 1 },
+        "type": { "enum": ["file", "symlink"] },
+        "target": { "$ref": "#/$defs/path" }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "symlink" } }, "required": ["type"] }, "then": { "properties": { "target": { "$ref": "#/$defs/path" } }, "required": ["target"] } }
+      ],
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

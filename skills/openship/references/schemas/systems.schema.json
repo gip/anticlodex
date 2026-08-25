@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openship.dev/schemas/systems.schema.json",
+  "title": "OpenShip Systems v1",
+  "type": "object",
+  "required": ["openship", "capability", "source", "system"],
+  "properties": {
+    "openship": { "const": "1.0" },
+    "capability": { "const": "systems" },
+    "source": {
+      "type": "object",
+      "required": ["manifest", "bundle"],
+      "properties": {
+        "manifest": { "$ref": "sources-manifest.schema.json" },
+        "bundle": { "$ref": "sources-bundle.schema.json" }
+      },
+      "additionalProperties": true
+    },
+    "system": {
+      "type": "object",
+      "required": ["id", "name", "rootNodeId", "nodes", "edges"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1 },
+        "rootNodeId": { "$ref": "#/$defs/id" },
+        "metadata": { "type": "object", "additionalProperties": true },
+        "nodes": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/node" } },
+        "edges": { "type": "array", "items": { "$ref": "#/$defs/edge" } },
+        "context": { "$ref": "#/$defs/context" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9._:-]+$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "ownership": { "enum": ["first_party", "third_party"] },
+    "node": {
+      "type": "object",
+      "required": ["id", "kind", "name", "metadata"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "enum": ["Root", "Host", "Container", "Process", "Library"] },
+        "name": { "type": "string", "minLength": 1 },
+        "parentId": { "$ref": "#/$defs/id" },
+        "sourceSelectors": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "metadata": {
+          "type": "object",
+          "required": ["ownership"],
+          "properties": {
+            "ownership": { "$ref": "#/$defs/ownership" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "edge": {
+      "type": "object",
+      "required": ["id", "type", "fromNodeId", "toNodeId"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "type": { "enum": ["Runtime", "Dataflow", "Dependency"] },
+        "fromNodeId": { "$ref": "#/$defs/id" },
+        "toNodeId": { "$ref": "#/$defs/id" },
+        "metadata": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": true
+    },
+    "document": {
+      "type": "object",
+      "required": ["kind", "hash", "title", "language", "text"],
+      "properties": {
+        "kind": { "enum": ["Document", "Skill", "Prompt"] },
+        "hash": { "$ref": "#/$defs/digest" },
+        "title": { "type": "string", "minLength": 1 },
+        "language": { "type": "string", "minLength": 1 },
+        "text": { "type": "string" },
+        "supersedes": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": true
+    },
+    "matrix": {
+      "type": "object",
+      "required": ["nodeId", "concern"],
+      "properties": {
+        "nodeId": { "$ref": "#/$defs/id" },
+        "concern": { "type": "string", "minLength": 1 },
+        "documentRefs": { "type": "array", "items": { "$ref": "#/$defs/digest" }, "uniqueItems": true },
+        "skillRefs": { "type": "array", "items": { "$ref": "#/$defs/digest" }, "uniqueItems": true }
+      },
+      "additionalProperties": true
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["id", "nodeId", "concern", "type"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "nodeId": { "$ref": "#/$defs/id" },
+        "concern": { "type": "string", "minLength": 1 },
+        "type": { "enum": ["Summary", "Docs", "Code"] },
+        "language": { "type": "string" },
+        "text": { "type": "string" },
+        "sourcePaths": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      },
+      "additionalProperties": true
+    },
+    "context": {
+      "type": "object",
+      "properties": {
+        "concerns": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "documents": { "type": "array", "items": { "$ref": "#/$defs/document" } },
+        "matrix": { "type": "array", "items": { "$ref": "#/$defs/matrix" } },
+        "systemPromptRefs": { "type": "array", "items": { "$ref": "#/$defs/digest" }, "uniqueItems": true },
+        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact" } }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openship.dev/schemas/changes-status.schema.json",
+  "title": "OpenShip Changes v1 status",
+  "type": "object",
+  "required": ["openship", "capability", "changeId", "base", "digest", "status", "candidateOrigin"],
+  "properties": {
+    "openship": { "const": "1.0" },
+    "capability": { "const": "changes" },
+    "changeId": { "type": "string", "minLength": 1 },
+    "base": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "status": { "enum": ["pending", "processing", "ready", "rejected", "failed"] },
+    "phase": { "type": "string", "minLength": 1 },
+    "candidateOrigin": { "type": "string", "format": "uri" },
+    "statusUrl": { "type": "string", "format": "uri" },
+    "buildId": { "type": "string", "minLength": 1 },
+    "reason": { "type": ["string", "null"] }
+  },
+  "additionalProperties": true
+}
+

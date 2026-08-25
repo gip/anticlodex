@@ -9,18 +9,26 @@
     ".": "./src/index.ts",
     "./styles.css": "./src/styles.css"
   },
+  "scripts": {
+    "test": "node --import tsx --test src/*.test.ts"
+  },
   "peerDependencies": {
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@types/react": "^19.0.8",
-    "@types/react-dom": "^19.0.3"
+    "@types/jsdom": "^30.0.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "jsdom": "^30.0.1",
+    "tsx": "^4.23.12"
   },
   "dependencies": {
+    "@openship/protocol": "0.0.1",
+    "dompurify": "^3.4.14",
     "elkjs": "^0.9.3",
     "lucide-react": "^0.563.0",
-    "marked": "^17.0.2",
+    "marked": "^17.0.6",
     "reactflow": "^11.11.4"
   }
 }

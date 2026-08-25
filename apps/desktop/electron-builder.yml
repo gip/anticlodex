@@ -1,0 +1,37 @@
+appId: xyz.edfi.anticlodex
+productName: Anticlodex
+# All dependencies are pure JS — there is nothing to rebuild, and @electron/rebuild
+# cannot walk pnpm's symlinked node_modules (it stats hoisted paths like
+# apps/desktop/node_modules/vite that do not exist under pnpm).
+npmRebuild: false
+
+directories:
+  output: release
+  buildResources: build
+
+# The main process externalizes @acx/agent-runtime and @workos/authkit-electron,
+# so node_modules must ship alongside the bundles.
+files:
+  - out/**
+  - assets/**
+  - package.json
+
+mac:
+  category: public.app-category.developer-tools
+  icon: assets/icon.png
+  target:
+    - dmg
+    - zip
+  # Required for notarization. Without hardenedRuntime the keychain ACL is not
+  # bound to a stable identity and macOS re-prompts on every rebuild.
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  notarize: true
+  # Packaged apps register anticlodex:// via Info.plist, not at runtime — without
+  # this the AuthKit PKCE callback never reaches the app.
+  protocols:
+    - name: Anticlodex
+      schemes:
+        - anticlodex

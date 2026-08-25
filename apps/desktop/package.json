@@ -1,13 +1,18 @@
 {
   "name": "@acx/desktop",
+  "productName": "Anticlodex",
   "version": "0.0.1",
+  "description": "OpenShip systems modelling desktop client",
+  "author": "edfi",
   "private": true,
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
-    "preview": "electron-vite preview"
+    "preview": "electron-vite preview",
+    "package": "electron-vite build && electron-builder --mac",
+    "package:dir": "electron-vite build && electron-builder --mac --dir"
   },
   "dependencies": {
     "@acx/agent-runtime": "workspace:*",
@@ -24,6 +29,7 @@
     "@types/react-dom": "^19.2.5",
     "@vitejs/plugin-react": "^5.2.0",
     "electron": "^40.10.6",
+    "electron-builder": "^25.1.8",
     "electron-vite": "^5.0.0"
   }
 }

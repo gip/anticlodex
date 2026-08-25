@@ -325,12 +325,17 @@ interface ElectronAuthBrokerAPI {
   ) => void;
 }
 
+interface ElectronIntegrationsAPI {
+  openExternal: (url: string) => Promise<{ ok?: boolean; error?: string }>;
+}
+
 declare global {
   interface Window {
     electronAPI: {
       platform: string;
       auth: ElectronAuthBrokerAPI;
       assistant?: ElectronAssistantAPI;
+      integrations?: ElectronIntegrationsAPI;
     };
   }
 }
@@ -781,6 +786,7 @@ function AccountSettingsRoute({ isAuthenticated }: { isAuthenticated: boolean })
     notion: "disconnected",
     google: "disconnected",
   });
+  const [integrationMessage, setIntegrationMessage] = useState("");
 
   const refreshIntegrationStatuses = useCallback(async () => {
     const nextStatuses: IntegrationStatusRecord = {
@@ -807,16 +813,32 @@ function AccountSettingsRoute({ isAuthenticated }: { isAuthenticated: boolean })
     void refreshIntegrationStatuses();
   }, [isAuthenticated, refreshIntegrationStatuses]);
 
+  // The OAuth round trip happens in the system browser, so the app learns the
+  // outcome when the user comes back to the window.
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const onFocus = () => {
+      void refreshIntegrationStatuses();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [isAuthenticated, refreshIntegrationStatuses]);
+
   useEffect(() => {
     const provider = searchParams.get("integration");
     const status = searchParams.get("integration_status");
     if (!provider || !status) return;
-    if (isAuthenticated) {
+    if (status === "error") {
+      setIntegrationMessage(
+        searchParams.get("integration_error") ?? `Could not connect ${provider}. Please try again.`,
+      );
+    } else if (isAuthenticated) {
       void refreshIntegrationStatuses();
     }
     setSearchParams((params) => {
       params.delete("integration");
       params.delete("integration_status");
+      params.delete("integration_error");
       return params;
     }, { replace: true });
   }, [isAuthenticated, refreshIntegrationStatuses, searchParams, setSearchParams]);
@@ -841,11 +863,12 @@ function AccountSettingsRoute({ isAuthenticated }: { isAuthenticated: boolean })
     <SettingsPage
       returnTo="/settings"
       integrationStatuses={integrationStatuses}
-      onConnectIntegration={async (provider, returnTo) => {
+      integrationMessage={integrationMessage}
+      onConnectIntegration={async (provider) => {
         try {
-          const res = await apiFetch(
-            `/integrations/${provider}/authorize-url?returnTo=${encodeURIComponent(returnTo)}`,
-          );
+          // `returnTo=app` tells the API there is no web page to redirect back
+          // to, so the browser tab ends on a "you can close this" page.
+          const res = await apiFetch(`/integrations/${provider}/authorize-url?returnTo=app`);
           if (!res.ok) {
             const body = await res.json().catch(() => ({}));
             return { error: body.error ?? `Failed to connect ${provider}` };
@@ -854,8 +877,11 @@ function AccountSettingsRoute({ isAuthenticated }: { isAuthenticated: boolean })
           if (!data.url) {
             return { error: `Failed to retrieve ${provider} authorization URL` };
           }
-          window.location.assign(data.url);
-          return { status: "connected" };
+          const opened = await window.electronAPI.integrations?.openExternal(data.url);
+          if (!opened?.ok) {
+            return { error: opened?.error ?? `Failed to open the ${provider} authorization page` };
+          }
+          return { notice: `Finish connecting ${provider} in your browser, then come back here.` };
         } catch {
           return { error: `Failed to connect ${provider}` };
         }
@@ -1664,6 +1690,17 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
     void refreshIntegrationStatuses();
   }, [isAuthenticated, refreshIntegrationStatuses]);
 
+  // The OAuth round trip happens in the system browser, so the app learns the
+  // outcome when the user comes back to the window.
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const onFocus = () => {
+      void refreshIntegrationStatuses();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [isAuthenticated, refreshIntegrationStatuses]);
+
   useEffect(() => {
     const provider = searchParams.get("integration");
     const status = searchParams.get("integration_status");
@@ -1674,6 +1711,7 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
     setSearchParams((params) => {
       params.delete("integration");
       params.delete("integration_status");
+      params.delete("integration_error");
       return params;
     }, { replace: true });
   }, [isAuthenticated, refreshIntegrationStatuses, searchParams, setSearchParams]);

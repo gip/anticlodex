@@ -33,7 +33,16 @@ import {
   type MatrixRefPayload,
 } from "../documents.js";
 import { fetchRemoteDocument, isIntegrationReconnectError } from "../integrations/tokens.js";
-import { isNotionApiError } from "../integrations/notion.js";
+import {
+  isIntegrationNotConfiguredError,
+  isInvalidSourceUrlError,
+  isProviderApiError,
+} from "../integrations/errors.js";
+import {
+  INTEGRATION_PROVIDERS,
+  getProviderClient,
+  resolveIntegrationStatus,
+} from "../integrations/index.js";
 import {
   claimAgentRunById,
   enqueueAgentRunWithWait,
@@ -2910,26 +2919,22 @@ export async function v1Routes(app: FastifyInstance) {
     const statusByProvider = new Map(result.rows.map((row) => [row.provider, row]));
 
     return {
-      items: ["notion", "google"].map((provider) => {
+      items: INTEGRATION_PROVIDERS.map((provider) => {
         const providerRow = statusByProvider.get(provider);
+        const configured = getProviderClient(provider).isConfigured();
         if (!providerRow) {
-          return { provider, status: "disconnected" as V1IntegrationStatus };
+          return { provider, status: "disconnected" as V1IntegrationStatus, configured };
         }
 
-        const hasRefresh = providerRow.refresh_token_enc !== null;
-        const status = providerRow.status as V1IntegrationStatus;
-        if (
-          status === "connected"
-          && providerRow.token_expires_at
-          && providerRow.token_expires_at.getTime() <= Date.now()
-        ) {
-          return {
-            provider,
-            status: hasRefresh ? ("needs_reauth" as V1IntegrationStatus) : ("expired" as V1IntegrationStatus),
-          };
-        }
-
-        return { provider, status };
+        return {
+          provider,
+          status: resolveIntegrationStatus(
+            providerRow.status,
+            providerRow.token_expires_at,
+            providerRow.refresh_token_enc !== null,
+          ) as V1IntegrationStatus,
+          configured,
+        };
       }),
     };
   });
@@ -3738,9 +3743,21 @@ export async function v1Routes(app: FastifyInstance) {
               "integration_reconnect_required",
             );
           }
-          if (isNotionApiError(error)) {
-            req.log.warn({ threadId: thread.id, status: error.status, reason: error.reason }, "Notion document import failed");
-            return writeProblem(reply, error.status >= 500 ? 502 : 400, "Import failed", error.reason, "notion_import_failed");
+          if (isInvalidSourceUrlError(error)) {
+            return writeProblem(reply, 400, "Invalid document URL", error.reason, "invalid_source_url");
+          }
+          if (isIntegrationNotConfiguredError(error)) {
+            req.log.error({ provider: error.provider, missing: error.missing }, "Integration is not configured");
+            return writeProblem(reply, 503, "Integration unavailable", error.reason, "integration_not_configured");
+          }
+          if (isProviderApiError(error)) {
+            req.log.warn({ threadId: thread.id, provider: error.provider, status: error.status, reason: error.reason }, "Document import failed");
+            // A 401 from the provider means the stored grant no longer works,
+            // which is the same "reconnect me" signal the token layer raises.
+            if (error.status === 401) {
+              return writeProblem(reply, 409, "Integration required", error.reason, "integration_reconnect_required");
+            }
+            return writeProblem(reply, error.status >= 500 ? 502 : 400, "Import failed", error.reason, `${error.provider}_import_failed`);
           }
           req.log.error({ threadId: thread.id, sourceType: payload.sourceType, err: error }, "Document import failed");
           throw error;

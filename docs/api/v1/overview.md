@@ -84,9 +84,11 @@ Query helpers:
 - `DELETE /v1/projects/:handle/:projectName/concerns/:concernName`
 
 - `GET /v1/integrations`  
+- `GET /v1/integrations/:provider/authorize`
 - `GET /v1/integrations/:provider/authorize-url`
 - `GET /v1/integrations/:provider/callback`
 - `GET /v1/integrations/:provider/status`
+- `POST /v1/integrations/:provider/disconnect`
 
 - `GET /v1/events?since=<cursor|timestamp>&limit=<n>`
 - `GET /v1/events/stream?since=<cursor|timestamp>`
@@ -100,6 +102,29 @@ Query helpers:
   - `/v1/integrations/notion/callback`
   - `/v1/integrations/google/callback`
 - If the API is accessed through a public origin that differs from the inbound request host, set `INTEGRATION_OAUTH_CALLBACK_ORIGIN` so OAuth providers receive the externally registered API origin.
+- After the exchange the callback redirects to the `returnTo` recorded when the flow started, carrying `integration`, `integration_status` (`connected` or `error`) and, on failure, `integration_error`.
+- `returnTo` must resolve to the frontend origin (`INTEGRATION_CALLBACK_ORIGIN`, else the request's `Origin`/`Referer`); anything else falls back to that origin.
+- Clients with no web page to return to — the desktop app, which opens the consent page in the system browser — pass `returnTo=app`. The callback then renders a "you can close this tab" page instead of redirecting, and the app re-reads status when its window regains focus.
+
+## Integration status
+
+`status` is derived per request, not just read from storage:
+
+- `connected` — usable now, or expired but holding a refresh token the API will spend on the next call.
+- `expired` — the access token lapsed and there is no refresh token; the user must reconnect.
+- `needs_reauth` — the provider rejected the stored grant; the user must reconnect.
+- `disconnected` — never connected, or explicitly disconnected.
+
+`configured` reports whether the server has that provider's client credentials at all. Requests against an unconfigured provider answer `503`.
+
+## Import failures
+
+`POST /v1/threads/:threadId/matrix/documents` maps provider failures to problem codes:
+
+- `invalid_source_url` (400) — the URL is not a page/document link for that provider.
+- `integration_reconnect_required` (409) — no usable credentials, or the provider rejected them.
+- `notion_import_failed` / `google_import_failed` (400, or 502 for provider 5xx) — the provider refused the request; `detail` carries the user-facing reason.
+- `integration_not_configured` (503) — the server is missing that provider's credentials.
 
 Shared event payload:
 

@@ -17,6 +17,24 @@ import { generateOpenShipFileBundle } from "../agent-runner.js";
 import { verifyAuth, verifyOptionalAuth, type AuthUser } from "../auth.js";
 import { SQL_LIKE_ESCAPE_CHARACTER, toLikeContainsPattern } from "../sql-like.js";
 import {
+  buildDocumentAddSummary,
+  buildDocumentCreateSummary,
+  buildDocumentModifySummary,
+  buildDocumentRemoveSummary,
+  buildDocumentText,
+  computeDocumentHash,
+  deriveDocumentName,
+  isValidDocumentName,
+  normalizeMatrixDocumentCreateBody,
+  normalizeMatrixDocumentReplaceBody,
+  normalizeMatrixRefBody,
+  parseDocumentText,
+  type DocKind,
+  type MatrixRefPayload,
+} from "../documents.js";
+import { fetchRemoteDocument, isIntegrationReconnectError } from "../integrations/tokens.js";
+import { isNotionApiError } from "../integrations/notion.js";
+import {
   claimAgentRunById,
   enqueueAgentRunWithWait,
   getAgentRunById,
@@ -402,6 +420,16 @@ interface V1ProjectThreadDocumentRow extends V1ThreadDocumentMetadataRow {
 
 interface V1ChatMessageRow {
   content: string;
+}
+
+interface V1ChatMessage {
+  id: string;
+  actionId: string;
+  role: "User" | "Assistant" | "System";
+  actionType: string;
+  actionPosition: number;
+  content: string;
+  createdAt: string;
 }
 
 interface V1SystemPromptRow {
@@ -1306,6 +1334,329 @@ async function publishThreadMatrixChanged(threadId: string, user: AuthUser, aggr
   }).catch(() => undefined);
 }
 
+// ============================================================================
+// Matrix mutation helpers
+//
+// Every matrix write goes through begin_action(), which forks the thread's
+// current system and returns the fork's id; writes land in the fork, and the
+// fork becomes current on COMMIT. commit_action_empty() drops the fork when a
+// write turned out to be a no-op, so a redundant request does not leave an
+// empty system behind.
+// ============================================================================
+
+interface V1MatrixDocumentRow {
+  hash: string;
+  kind: string;
+  title: string;
+  language: string;
+  text: string;
+  source_type: string;
+  source_url: string | null;
+  source_external_id: string | null;
+  source_metadata: Record<string, unknown> | null;
+  source_connected_user_id: string | null;
+}
+
+function toV1MatrixDocument(row: V1MatrixDocumentRow) {
+  return {
+    hash: row.hash,
+    kind: row.kind,
+    title: row.title,
+    language: row.language,
+    text: row.text,
+    sourceType: row.source_type,
+    sourceUrl: row.source_url,
+    sourceExternalId: row.source_external_id,
+    sourceMetadata: row.source_metadata,
+    sourceConnectedUserId: row.source_connected_user_id,
+  };
+}
+
+const MATRIX_DOCUMENT_COLUMNS = `hash, kind::text AS kind, title, language, text,
+  source_type::text AS source_type, source_url, source_external_id,
+  source_metadata, source_connected_user_id`;
+
+async function beginMatrixAction(
+  client: PoolClient,
+  threadId: string,
+  actionId: string,
+  actionType: "Edit" | "Import",
+  title: string,
+): Promise<string> {
+  const result = await client.query<{ output_system_id: string }>(
+    `SELECT begin_action($1, $2, $3::action_type, $4) AS output_system_id`,
+    [threadId, actionId, actionType, title],
+  );
+  const outputSystemId = result.rows[0]?.output_system_id;
+  if (!outputSystemId) throw new Error("Failed to create action output system");
+  return outputSystemId;
+}
+
+async function getDocumentTitleByHash(
+  client: PoolClient,
+  systemId: string,
+  hash: string,
+): Promise<string | null> {
+  const result = await client.query<{ title: string }>(
+    `SELECT title FROM documents WHERE system_id = $1 AND hash = $2 LIMIT 1`,
+    [systemId, hash],
+  );
+  return result.rows[0]?.title ?? null;
+}
+
+async function getNodeNameById(
+  client: PoolClient,
+  systemId: string,
+  nodeId: string,
+): Promise<string | null> {
+  const result = await client.query<{ name: string }>(
+    `SELECT name FROM nodes WHERE system_id = $1 AND id = $2 LIMIT 1`,
+    [systemId, nodeId],
+  );
+  return result.rows[0]?.name ?? null;
+}
+
+async function getNodeNamesByDocumentHash(
+  client: PoolClient,
+  systemId: string,
+  docHash: string,
+): Promise<string[]> {
+  const result = await client.query<{ name: string }>(
+    `SELECT DISTINCT n.name
+       FROM matrix_refs mr
+       JOIN nodes n ON n.system_id = mr.system_id AND n.id = mr.node_id
+      WHERE mr.system_id = $1 AND mr.doc_hash = $2
+      ORDER BY n.name`,
+    [systemId, docHash],
+  );
+  return result.rows.map((row) => row.name);
+}
+
+async function insertSystemActionMessage(
+  client: PoolClient,
+  threadId: string,
+  actionId: string,
+  content: string,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO messages (id, thread_id, action_id, role, content, position)
+     VALUES ($1, $2, $3, 'System'::message_role, $4, 1)`,
+    [randomUUID(), threadId, actionId, content],
+  );
+}
+
+async function getActionMessages(
+  client: PoolClient,
+  threadId: string,
+  actionId: string,
+): Promise<V1ChatMessage[]> {
+  const result = await client.query<{
+    id: string;
+    action_id: string;
+    action_type: string;
+    action_position: number;
+    role: "User" | "Assistant" | "System";
+    content: string;
+    created_at: Date;
+  }>(
+    `SELECT m.id, m.action_id, m.role, m.content, m.created_at,
+            a.position AS action_position, a.type::text AS action_type
+       FROM messages m
+       JOIN actions a ON a.thread_id = m.thread_id AND a.id = m.action_id
+      WHERE m.thread_id = $1 AND m.action_id = $2
+      ORDER BY m.position`,
+    [threadId, actionId],
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    actionId: row.action_id,
+    role: row.role,
+    actionType: row.action_type,
+    actionPosition: row.action_position,
+    content: row.content,
+    createdAt: row.created_at.toISOString(),
+  }));
+}
+
+async function getSystemRootNodeId(systemId: string, client: PoolClient): Promise<string | null> {
+  const result = await client.query<{ root_node_id: string }>(
+    `SELECT root_node_id FROM systems WHERE id = $1`,
+    [systemId],
+  );
+  return result.rows[0]?.root_node_id ?? null;
+}
+
+// A system prompt is modelled as a Prompt ref on the system root node under one
+// reserved concern. The concern is created on demand because it is an internal
+// slot rather than something a user adds to the matrix.
+async function validateSystemPromptAttachment(
+  client: PoolClient,
+  systemId: string,
+  attachment: { nodeId: string; concerns: string[]; docHash: string },
+): Promise<
+  | { valid: true; payload: MatrixRefPayload }
+  | { valid: false; error: string }
+> {
+  const rootNodeId = await getSystemRootNodeId(systemId, client);
+  if (!rootNodeId) return { valid: false, error: "Unable to resolve system root node" };
+  if (attachment.concerns.length !== 1) {
+    return { valid: false, error: "System prompts require exactly one concern" };
+  }
+  if (attachment.concerns[0] !== SYSTEM_PROMPT_CONCERN) {
+    return { valid: false, error: `System prompts require concern "${SYSTEM_PROMPT_CONCERN}"` };
+  }
+  if (attachment.nodeId !== rootNodeId) {
+    return { valid: false, error: "System prompts can only be attached to the system root node" };
+  }
+
+  await client.query(
+    `INSERT INTO concerns (system_id, name, position, is_baseline, scope)
+     VALUES ($1, $2, COALESCE((SELECT MAX(position) FROM concerns WHERE system_id = $1), -1) + 1, false, 'system')
+     ON CONFLICT DO NOTHING`,
+    [systemId, SYSTEM_PROMPT_CONCERN],
+  );
+
+  return {
+    valid: true,
+    payload: {
+      nodeId: rootNodeId,
+      concern: SYSTEM_PROMPT_CONCERN,
+      concerns: [SYSTEM_PROMPT_CONCERN],
+      refType: "Prompt",
+      docHash: attachment.docHash,
+    },
+  };
+}
+
+async function getSystemPromptsForSystem(systemId: string): Promise<V1SystemPromptRow[]> {
+  const result = await query<V1SystemPromptRow>(
+    `SELECT d.hash, d.text, d.title
+       FROM systems s
+       JOIN matrix_refs mr
+         ON mr.system_id = s.id
+        AND mr.node_id = s.root_node_id
+        AND mr.ref_type = 'Prompt'::ref_type
+        AND mr.concern = $2
+       JOIN documents d ON d.system_id = mr.system_id AND d.hash = mr.doc_hash
+      WHERE s.id = $1
+      ORDER BY d.created_at DESC`,
+    [systemId, SYSTEM_PROMPT_CONCERN],
+  );
+
+  const deduped = new Map<string, V1SystemPromptRow>();
+  for (const row of result.rows) {
+    if (!deduped.has(row.hash)) deduped.set(row.hash, row);
+  }
+  return Array.from(deduped.values());
+}
+
+async function getSystemPromptMetadata(systemId: string): Promise<{
+  systemPrompt: string | null;
+  systemPromptTitle: string | null;
+  systemPrompts: V1SystemPromptRow[];
+}> {
+  const systemPrompts = await getSystemPromptsForSystem(systemId);
+  return {
+    systemPrompt: systemPrompts[0]?.text ?? null,
+    systemPromptTitle: systemPrompts[0]?.title ?? null,
+    systemPrompts,
+  };
+}
+
+// The cells the client needs after a mutation: only the ones it touched.
+// Artifacts are always empty here, matching the thread read, which does not
+// surface them either -- returning them only on mutation would make a cell gain
+// artifacts on edit and lose them again on the next refresh.
+async function getMatrixCellsForNode(
+  systemId: string,
+  nodeId: string,
+  concerns: string[],
+): Promise<V1ThreadMatrixNodeCell[]> {
+  const wanted = Array.from(new Set(concerns.map((concern) => concern.trim()).filter(Boolean)));
+  if (wanted.length === 0) return [];
+
+  const result = await query<{
+    node_id: string;
+    concern: string;
+    hash: string;
+    title: string;
+    kind: string;
+    language: string;
+    source_type: string;
+    source_url: string | null;
+    source_external_id: string | null;
+    source_metadata: Record<string, unknown> | null;
+    source_connected_user_id: string | null;
+    ref_type: string;
+  }>(
+    `SELECT mr.node_id, mr.concern, d.hash, d.title, d.kind::text AS kind, d.language,
+            d.source_type::text AS source_type, d.source_url, d.source_external_id,
+            d.source_metadata, d.source_connected_user_id, mr.ref_type::text AS ref_type
+       FROM matrix_refs mr
+       JOIN documents d ON d.system_id = mr.system_id AND d.hash = mr.doc_hash
+      WHERE mr.system_id = $1
+        AND mr.node_id = $2
+        AND mr.concern = ANY($3::text[])
+        AND mr.ref_type IN ('Document'::ref_type, 'Skill'::ref_type)
+      ORDER BY mr.ref_type, d.title`,
+    [systemId, nodeId, wanted],
+  );
+
+  // Every requested concern gets a cell, including the ones that came back with
+  // no rows: the client replaces cells by key, so an emptied cell has to be
+  // returned as empty rather than omitted, or the removed document lingers.
+  const byConcern = new Map<string, V1ThreadMatrixNodeCell>(
+    wanted.map((concern) => [concern, { nodeId, concern, docs: [], artifacts: [] }]),
+  );
+  for (const row of result.rows) {
+    byConcern.get(row.concern)?.docs.push({
+      hash: row.hash,
+      title: row.title,
+      kind: row.kind,
+      language: row.language,
+      sourceType: row.source_type,
+      sourceUrl: row.source_url,
+      sourceExternalId: row.source_external_id,
+      sourceMetadata: row.source_metadata,
+      sourceConnectedUserId: row.source_connected_user_id,
+      refType: row.ref_type,
+    });
+  }
+
+  return wanted.map((concern) => byConcern.get(concern)).filter((cell): cell is V1ThreadMatrixNodeCell => Boolean(cell));
+}
+
+// The client accepts either `cell` (single) or `cells`; send both when there is
+// exactly one so either read path works.
+function buildMatrixRefResponse(
+  systemId: string,
+  cells: V1ThreadMatrixNodeCell[],
+  messages: V1ChatMessage[],
+  systemPrompt?: Awaited<ReturnType<typeof getSystemPromptMetadata>>,
+) {
+  return {
+    systemId,
+    ...(cells.length === 1 ? { cell: cells[0] } : {}),
+    cells,
+    messages,
+    ...(systemPrompt ?? {}),
+  };
+}
+
+async function rollbackQuietly(client: PoolClient): Promise<void> {
+  try {
+    await client.query("ROLLBACK");
+  } catch {
+    // The connection is being released either way; a failed rollback here would
+    // mask the error that caused it.
+  }
+}
+
+function isForeignKeyViolation(error: unknown): boolean {
+  return error instanceof Error && (error as { code?: string }).code === "23503";
+}
+
 const OPTIONAL_AUTH_READ_ROUTES = new Set([
   "/projects",
   "/threads",
@@ -1360,14 +1711,27 @@ export async function v1Routes(app: FastifyInstance) {
         [params.threadId],
       );
       legacy = result.rows[0]?.spec_version === "openship/v1";
-      if (!result.rows[0] && /^\d+$/.test(params.threadId) && typeof querystring.projectId === "string") {
-        const scoped = await query<{ spec_version: string }>(
-          `SELECT s.spec_version FROM threads t
-           JOIN systems s ON s.id=thread_current_system(t.id)
-           WHERE t.project_id=$1 AND t.project_thread_id=$2 LIMIT 1`,
-          [querystring.projectId, Number(params.threadId)],
-        );
-        legacy = scoped.rows[0]?.spec_version === "openship/v1";
+      if (!result.rows[0] && /^\d+$/.test(params.threadId)) {
+        // A numeric thread id needs the request's project scope to resolve, and
+        // that scope is either a project id or a handle/projectName pair.
+        const scoped = typeof querystring.projectId === "string"
+          ? await query<{ spec_version: string }>(
+              `SELECT s.spec_version FROM threads t
+               JOIN systems s ON s.id=thread_current_system(t.id)
+               WHERE t.project_id=$1 AND t.project_thread_id=$2 LIMIT 1`,
+              [querystring.projectId, Number(params.threadId)],
+            )
+          : typeof querystring.handle === "string" && typeof querystring.projectName === "string"
+            ? await query<{ spec_version: string }>(
+                `SELECT s.spec_version FROM threads t
+                 JOIN projects p ON p.id=t.project_id
+                 JOIN users owner_u ON owner_u.id=p.owner_id
+                 JOIN systems s ON s.id=thread_current_system(t.id)
+                 WHERE owner_u.handle=$1 AND p.name=$2 AND t.project_thread_id=$3 LIMIT 1`,
+                [querystring.handle, querystring.projectName, Number(params.threadId)],
+              )
+            : null;
+        legacy = scoped?.rows[0]?.spec_version === "openship/v1";
       }
     } else if (params.runId) {
       const result = await query<{ spec_version: string }>(
@@ -3141,6 +3505,545 @@ export async function v1Routes(app: FastifyInstance) {
       );
 
       return { hashes: result.rows.map((row) => row.hash) };
+    },
+  );
+
+  // Attach a document to one or more matrix cells.
+  app.post<{ Params: { threadId: string }; Querystring: V1ThreadScopeQuerystring; Body: unknown }>(
+    "/threads/:threadId/matrix/refs",
+    async (req, reply) => {
+      const user = (req as V1AuthRequest).auth;
+      const threadAccess = await resolveThreadAccessByRequestParam(req.params.threadId, user.id, req.query);
+      if (threadAccess.kind !== "found") {
+        writeThreadAccessFailure(reply, threadAccess);
+        return;
+      }
+      const thread = threadAccess.thread;
+      if (!canEdit(thread.access_role)) return forbiddenProblem(reply);
+
+      let payload = normalizeMatrixRefBody(req.body);
+      if (!payload) {
+        return writeProblem(reply, 400, "Invalid matrix reference", "nodeId, docHash, refType and at least one concern are required.");
+      }
+
+      const client = await pool.connect();
+      let inTransaction = false;
+      let actionMessages: V1ChatMessage[] = [];
+
+      try {
+        await client.query("BEGIN");
+        inTransaction = true;
+
+        const actionId = randomUUID();
+        const outputSystemId = await beginMatrixAction(client, thread.id, actionId, "Edit", "Matrix doc add");
+
+        if (payload.refType === "Prompt") {
+          const validation = await validateSystemPromptAttachment(client, outputSystemId, payload);
+          if (!validation.valid) {
+            await rollbackQuietly(client);
+            inTransaction = false;
+            return writeProblem(reply, 400, "Invalid system prompt", validation.error);
+          }
+          payload = validation.payload;
+        }
+
+        let changed = 0;
+        for (const concern of payload.concerns) {
+          const inserted = await client.query(
+            `INSERT INTO matrix_refs (system_id, node_id, concern, ref_type, doc_hash)
+             VALUES ($1, $2, $3, $4::ref_type, $5)
+             ON CONFLICT DO NOTHING`,
+            [outputSystemId, payload.nodeId, concern, payload.refType, payload.docHash],
+          );
+          changed += inserted.rowCount ?? 0;
+        }
+
+        if (changed === 0) {
+          await client.query("SELECT commit_action_empty($1, $2)", [thread.id, actionId]);
+        } else {
+          const title = await getDocumentTitleByHash(client, outputSystemId, payload.docHash) ?? payload.docHash;
+          const nodeName = await getNodeNameById(client, outputSystemId, payload.nodeId);
+          await insertSystemActionMessage(client, thread.id, actionId, buildDocumentAddSummary(title, nodeName));
+          actionMessages = await getActionMessages(client, thread.id, actionId);
+        }
+
+        await client.query("COMMIT");
+        inTransaction = false;
+      } catch (error: unknown) {
+        if (inTransaction) await rollbackQuietly(client);
+        if (isForeignKeyViolation(error)) {
+          return writeProblem(reply, 400, "Invalid matrix reference", "Unknown node, concern, or document.");
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
+
+      const systemId = await getThreadSystemId(thread.id);
+      if (!systemId) return writeProblem(reply, 500, "System missing", "Thread has no current system");
+
+      await publishThreadMatrixChanged(thread.id, user, thread.id);
+      return buildMatrixRefResponse(
+        systemId,
+        await getMatrixCellsForNode(systemId, payload.nodeId, payload.concerns),
+        actionMessages,
+        payload.refType === "Prompt" ? await getSystemPromptMetadata(systemId) : undefined,
+      );
+    },
+  );
+
+  // Detach a document from one or more matrix cells.
+  app.delete<{ Params: { threadId: string }; Querystring: V1ThreadScopeQuerystring; Body: unknown }>(
+    "/threads/:threadId/matrix/refs",
+    async (req, reply) => {
+      const user = (req as V1AuthRequest).auth;
+      const threadAccess = await resolveThreadAccessByRequestParam(req.params.threadId, user.id, req.query);
+      if (threadAccess.kind !== "found") {
+        writeThreadAccessFailure(reply, threadAccess);
+        return;
+      }
+      const thread = threadAccess.thread;
+      if (!canEdit(thread.access_role)) return forbiddenProblem(reply);
+
+      let payload = normalizeMatrixRefBody(req.body);
+      if (!payload) {
+        return writeProblem(reply, 400, "Invalid matrix reference", "nodeId, docHash, refType and at least one concern are required.");
+      }
+
+      const client = await pool.connect();
+      let inTransaction = false;
+      let actionMessages: V1ChatMessage[] = [];
+
+      try {
+        await client.query("BEGIN");
+        inTransaction = true;
+
+        const actionId = randomUUID();
+        const outputSystemId = await beginMatrixAction(client, thread.id, actionId, "Edit", "Matrix doc remove");
+
+        if (payload.refType === "Prompt") {
+          const validation = await validateSystemPromptAttachment(client, outputSystemId, payload);
+          if (!validation.valid) {
+            await rollbackQuietly(client);
+            inTransaction = false;
+            return writeProblem(reply, 400, "Invalid system prompt", validation.error);
+          }
+          payload = validation.payload;
+        }
+
+        // The title has to be read before the ref goes, or the summary message
+        // would have nothing left to name.
+        const title = await getDocumentTitleByHash(client, outputSystemId, payload.docHash) ?? payload.docHash;
+        const nodeName = await getNodeNameById(client, outputSystemId, payload.nodeId);
+
+        let changed = 0;
+        for (const concern of payload.concerns) {
+          const deleted = await client.query(
+            `DELETE FROM matrix_refs
+              WHERE system_id = $1
+                AND node_id = $2
+                AND concern_hash = md5($3)
+                AND concern = $3
+                AND ref_type = $4::ref_type
+                AND doc_hash = $5`,
+            [outputSystemId, payload.nodeId, concern, payload.refType, payload.docHash],
+          );
+          changed += deleted.rowCount ?? 0;
+        }
+
+        if (changed === 0) {
+          await client.query("SELECT commit_action_empty($1, $2)", [thread.id, actionId]);
+        } else {
+          await insertSystemActionMessage(client, thread.id, actionId, buildDocumentRemoveSummary(title, nodeName));
+          actionMessages = await getActionMessages(client, thread.id, actionId);
+        }
+
+        await client.query("COMMIT");
+        inTransaction = false;
+      } catch (error: unknown) {
+        if (inTransaction) await rollbackQuietly(client);
+        throw error;
+      } finally {
+        client.release();
+      }
+
+      const systemId = await getThreadSystemId(thread.id);
+      if (!systemId) return writeProblem(reply, 500, "System missing", "Thread has no current system");
+
+      await publishThreadMatrixChanged(thread.id, user, thread.id);
+      return buildMatrixRefResponse(
+        systemId,
+        await getMatrixCellsForNode(systemId, payload.nodeId, payload.concerns),
+        actionMessages,
+        payload.refType === "Prompt" ? await getSystemPromptMetadata(systemId) : undefined,
+      );
+    },
+  );
+
+  // Create a document -- authored locally, or imported from a connected
+  // provider -- and optionally attach it to a cell in the same action.
+  app.post<{ Params: { threadId: string }; Querystring: V1ThreadScopeQuerystring; Body: unknown }>(
+    "/threads/:threadId/matrix/documents",
+    async (req, reply) => {
+      const user = (req as V1AuthRequest).auth;
+      const threadAccess = await resolveThreadAccessByRequestParam(req.params.threadId, user.id, req.query);
+      if (threadAccess.kind !== "found") {
+        writeThreadAccessFailure(reply, threadAccess);
+        return;
+      }
+      const thread = threadAccess.thread;
+      if (!canEdit(thread.access_role)) return forbiddenProblem(reply);
+
+      const payload = normalizeMatrixDocumentCreateBody(req.body);
+      if (!payload) {
+        return writeProblem(reply, 400, "Invalid document", "A local document needs kind, title, name and description; an imported one needs kind and sourceUrl.");
+      }
+      if (payload.kind === "Prompt" && payload.sourceType !== "local") {
+        return writeProblem(reply, 400, "Invalid system prompt", "System prompts must be local documents.");
+      }
+      if (payload.kind === "Prompt" && !payload.attach) {
+        return writeProblem(reply, 400, "Invalid system prompt", "System prompts require an attach payload.");
+      }
+
+      let sourceUrl: string | null = null;
+      let sourceExternalId: string | null = null;
+      let sourceMetadata: Record<string, unknown> | null = null;
+      let sourceConnectedUserId: string | null = null;
+      let title = payload.title ?? "";
+      let text: string;
+
+      if (payload.sourceType === "local") {
+        text = buildDocumentText({
+          name: payload.name ?? "",
+          description: payload.description ?? "",
+          body: payload.body ?? "",
+        });
+      } else {
+        try {
+          const remote = await fetchRemoteDocument(user.id, payload.sourceType, payload.sourceUrl ?? "");
+          sourceUrl = remote.sourceUrl;
+          sourceExternalId = remote.sourceExternalId;
+          sourceMetadata = remote.sourceMetadata;
+          sourceConnectedUserId = user.id;
+          title = remote.title || title || "Imported document";
+          text = remote.text;
+        } catch (error: unknown) {
+          if (isIntegrationReconnectError(error)) {
+            req.log.warn({ threadId: thread.id, provider: error.provider, status: error.status }, "Document import blocked by integration state");
+            return writeProblem(
+              reply,
+              409,
+              "Integration required",
+              `Reconnect ${error.provider} to import this document.`,
+              "integration_reconnect_required",
+            );
+          }
+          if (isNotionApiError(error)) {
+            req.log.warn({ threadId: thread.id, status: error.status, reason: error.reason }, "Notion document import failed");
+            return writeProblem(reply, error.status >= 500 ? 502 : 400, "Import failed", error.reason, "notion_import_failed");
+          }
+          req.log.error({ threadId: thread.id, sourceType: payload.sourceType, err: error }, "Document import failed");
+          throw error;
+        }
+      }
+
+      const hash = computeDocumentHash({ kind: payload.kind, title, language: payload.language, body: text });
+
+      const client = await pool.connect();
+      let inTransaction = false;
+      let actionMessages: V1ChatMessage[] = [];
+      let attach = payload.attach;
+      let insertedDocument: V1MatrixDocumentRow | null = null;
+
+      try {
+        await client.query("BEGIN");
+        inTransaction = true;
+
+        const actionId = randomUUID();
+        const isImport = payload.sourceType !== "local";
+        const outputSystemId = await beginMatrixAction(
+          client,
+          thread.id,
+          actionId,
+          isImport ? "Import" : "Edit",
+          isImport ? "Matrix doc import" : "Matrix doc create",
+        );
+
+        if (payload.kind === "Prompt" && attach) {
+          const validation = await validateSystemPromptAttachment(client, outputSystemId, {
+            nodeId: attach.nodeId,
+            concerns: attach.concerns,
+            docHash: attach.docHash ?? hash,
+          });
+          if (!validation.valid) {
+            await rollbackQuietly(client);
+            inTransaction = false;
+            return writeProblem(reply, 400, "Invalid system prompt", validation.error);
+          }
+          attach = { ...validation.payload, docHash: hash };
+        }
+
+        const insertResult = await client.query<V1MatrixDocumentRow>(
+          `INSERT INTO documents (
+             hash, system_id, kind, title, language, text, source_type,
+             source_url, source_external_id, source_metadata, source_connected_user_id
+           )
+           VALUES ($1, $2, $3::doc_kind, $4, $5, $6, $7::doc_source_type, $8, $9, $10, $11)
+           ON CONFLICT (system_id, hash) DO NOTHING
+           RETURNING ${MATRIX_DOCUMENT_COLUMNS}`,
+          [
+            hash, outputSystemId, payload.kind, title, payload.language, text,
+            payload.sourceType, sourceUrl, sourceExternalId, sourceMetadata, sourceConnectedUserId,
+          ],
+        );
+        insertedDocument = insertResult.rows[0] ?? null;
+
+        let attachedRefs = 0;
+        if (attach) {
+          for (const concern of attach.concerns) {
+            const inserted = await client.query(
+              `INSERT INTO matrix_refs (system_id, node_id, concern, ref_type, doc_hash)
+               VALUES ($1, $2, $3, $4::ref_type, $5)
+               ON CONFLICT DO NOTHING`,
+              [outputSystemId, attach.nodeId, concern, attach.refType, hash],
+            );
+            attachedRefs += inserted.rowCount ?? 0;
+          }
+        }
+
+        // Re-creating an identical document that is already attached changes
+        // nothing, and the forked system is dropped rather than kept empty.
+        if ((insertResult.rowCount ?? 0) === 0 && attachedRefs === 0) {
+          await client.query("SELECT commit_action_empty($1, $2)", [thread.id, actionId]);
+        } else {
+          const nodeName = attach ? await getNodeNameById(client, outputSystemId, attach.nodeId) : null;
+          await insertSystemActionMessage(
+            client,
+            thread.id,
+            actionId,
+            buildDocumentCreateSummary(title, payload.sourceType, nodeName, attachedRefs > 0),
+          );
+          actionMessages = await getActionMessages(client, thread.id, actionId);
+        }
+
+        await client.query("COMMIT");
+        inTransaction = false;
+      } catch (error: unknown) {
+        if (inTransaction) await rollbackQuietly(client);
+        if (isForeignKeyViolation(error)) {
+          return writeProblem(reply, 400, "Invalid attachment", "Unknown node or concern.");
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
+
+      const systemId = await getThreadSystemId(thread.id);
+      if (!systemId) return writeProblem(reply, 500, "System missing", "Thread has no current system");
+
+      await publishThreadMatrixChanged(thread.id, user, thread.id);
+      const document = insertedDocument
+        ? toV1MatrixDocument(insertedDocument)
+        : {
+            hash,
+            kind: payload.kind as string,
+            title,
+            language: payload.language,
+            text,
+            sourceType: payload.sourceType as string,
+            sourceUrl,
+            sourceExternalId,
+            sourceMetadata,
+            sourceConnectedUserId,
+          };
+      const cells = attach ? await getMatrixCellsForNode(systemId, attach.nodeId, attach.concerns) : [];
+
+      return {
+        systemId,
+        document,
+        ...(cells.length === 1 ? { cell: cells[0] } : {}),
+        ...(cells.length > 0 ? { cells } : {}),
+        messages: actionMessages,
+        ...(payload.kind === "Prompt" ? await getSystemPromptMetadata(systemId) : {}),
+      };
+    },
+  );
+
+  // Edit a document. Documents are content-addressed, so an edit inserts a new
+  // row under a new hash and repoints every ref at it; the old row stays, which
+  // is what makes an earlier action's view of the document still resolvable.
+  app.patch<{ Params: { threadId: string; hash: string }; Querystring: V1ThreadScopeQuerystring; Body: unknown }>(
+    "/threads/:threadId/matrix/documents/:hash",
+    async (req, reply) => {
+      const user = (req as V1AuthRequest).auth;
+      const threadAccess = await resolveThreadAccessByRequestParam(req.params.threadId, user.id, req.query);
+      if (threadAccess.kind !== "found") {
+        writeThreadAccessFailure(reply, threadAccess);
+        return;
+      }
+      const thread = threadAccess.thread;
+      if (!canEdit(thread.access_role)) return forbiddenProblem(reply);
+
+      const documentHash = req.params.hash.trim();
+      const payload = normalizeMatrixDocumentReplaceBody(req.body);
+      if (!documentHash || !payload) {
+        return writeProblem(reply, 400, "Invalid document patch", "Supply at least one of title, name, description, language or body.");
+      }
+
+      const client = await pool.connect();
+      let inTransaction = false;
+      let actionMessages: V1ChatMessage[] = [];
+
+      try {
+        await client.query("BEGIN");
+        inTransaction = true;
+
+        const actionId = randomUUID();
+        const outputSystemId = await beginMatrixAction(client, thread.id, actionId, "Edit", "Matrix doc replace");
+
+        const existingResult = await client.query<V1MatrixDocumentRow>(
+          `SELECT ${MATRIX_DOCUMENT_COLUMNS} FROM documents WHERE system_id = $1 AND hash = $2`,
+          [outputSystemId, documentHash],
+        );
+        const existing = existingResult.rows[0];
+        if (!existing) {
+          await rollbackQuietly(client);
+          inTransaction = false;
+          return notFoundProblem(reply, "Document not found");
+        }
+
+        const isPromptDocument = existing.kind === "Prompt";
+        const isRemoteDocument = existing.source_type !== "local";
+
+        if (isPromptDocument && isRemoteDocument) {
+          await rollbackQuietly(client);
+          inTransaction = false;
+          return writeProblem(reply, 400, "Invalid system prompt", "Prompt documents must be local.");
+        }
+
+        if (isPromptDocument) {
+          const rootNodeId = await getSystemRootNodeId(outputSystemId, client);
+          if (!rootNodeId) {
+            await rollbackQuietly(client);
+            inTransaction = false;
+            return writeProblem(reply, 500, "System missing", "Unable to resolve system root node");
+          }
+          const strayRefs = await client.query(
+            `SELECT 1 FROM matrix_refs
+              WHERE system_id = $1 AND doc_hash = $2
+                AND ref_type = 'Prompt'::ref_type AND node_id <> $3
+              LIMIT 1`,
+            [outputSystemId, documentHash, rootNodeId],
+          );
+          if ((strayRefs.rowCount ?? 0) > 0) {
+            await rollbackQuietly(client);
+            inTransaction = false;
+            return writeProblem(reply, 400, "Invalid system prompt", "Prompt documents must remain attached to the system root node.");
+          }
+        }
+
+        // A remote document's text is a snapshot of what the provider returned.
+        // Editing it here would make the local copy disagree with its source
+        // while still claiming to be that source; refreshing it is a re-import.
+        if (isRemoteDocument && (payload.body !== undefined || payload.name !== undefined || payload.description !== undefined)) {
+          await rollbackQuietly(client);
+          inTransaction = false;
+          return writeProblem(
+            reply,
+            400,
+            "Imported document is read-only",
+            "Imported documents cannot be edited as markdown. Re-import to refresh the snapshot.",
+          );
+        }
+
+        const nextTitle = payload.title ?? existing.title;
+        const nextLanguage = payload.language ?? existing.language;
+        const parsedExisting = isRemoteDocument ? null : parseDocumentText(existing.text);
+        const existingName = parsedExisting?.name && isValidDocumentName(parsedExisting.name)
+          ? parsedExisting.name
+          : deriveDocumentName(nextTitle);
+        const nextText = isRemoteDocument
+          ? existing.text
+          : buildDocumentText({
+              name: payload.name ?? existingName,
+              description: payload.description ?? parsedExisting?.description ?? "",
+              body: payload.body ?? parsedExisting?.body ?? "",
+            });
+        const nextHash = computeDocumentHash({
+          kind: existing.kind as DocKind,
+          title: nextTitle,
+          language: nextLanguage,
+          body: nextText,
+        });
+
+        const insertResult = await client.query<V1MatrixDocumentRow>(
+          `INSERT INTO documents (
+             hash, system_id, kind, title, language, text, source_type,
+             source_url, source_external_id, source_metadata, source_connected_user_id, supersedes
+           )
+           VALUES ($1, $2, $3::doc_kind, $4, $5, $6, $7::doc_source_type, $8, $9, $10, $11, $12)
+           ON CONFLICT (system_id, hash) DO NOTHING
+           RETURNING ${MATRIX_DOCUMENT_COLUMNS}`,
+          [
+            nextHash, outputSystemId, existing.kind, nextTitle, nextLanguage, nextText,
+            existing.source_type, existing.source_url, existing.source_external_id,
+            existing.source_metadata, existing.source_connected_user_id, existing.hash,
+          ],
+        );
+
+        const updatedRefs = await client.query(
+          `UPDATE matrix_refs SET doc_hash = $3 WHERE system_id = $1 AND doc_hash = $2`,
+          [outputSystemId, existing.hash, nextHash],
+        );
+        const replacedRefs = updatedRefs.rowCount ?? 0;
+
+        if ((insertResult.rowCount ?? 0) === 0 && replacedRefs === 0) {
+          await client.query("SELECT commit_action_empty($1, $2)", [thread.id, actionId]);
+        } else {
+          const nodeNames = await getNodeNamesByDocumentHash(client, outputSystemId, nextHash);
+          await insertSystemActionMessage(
+            client,
+            thread.id,
+            actionId,
+            buildDocumentModifySummary(existing.title, nextTitle, nodeNames),
+          );
+          actionMessages = await getActionMessages(client, thread.id, actionId);
+        }
+
+        await client.query("COMMIT");
+        inTransaction = false;
+
+        const systemId = await getThreadSystemId(thread.id);
+        if (!systemId) return writeProblem(reply, 500, "System missing", "Thread has no current system");
+
+        await publishThreadMatrixChanged(thread.id, user, thread.id);
+        return {
+          systemId,
+          oldHash: existing.hash,
+          document: insertResult.rows[0]
+            ? toV1MatrixDocument(insertResult.rows[0])
+            : {
+                hash: nextHash,
+                kind: existing.kind,
+                title: nextTitle,
+                language: nextLanguage,
+                text: nextText,
+                sourceType: existing.source_type,
+                sourceUrl: existing.source_url,
+                sourceExternalId: existing.source_external_id,
+                sourceMetadata: existing.source_metadata,
+                sourceConnectedUserId: existing.source_connected_user_id,
+              },
+          replacedRefs,
+          messages: actionMessages,
+          ...(isPromptDocument ? await getSystemPromptMetadata(systemId) : {}),
+        };
+      } catch (error: unknown) {
+        if (inTransaction) await rollbackQuietly(client);
+        throw error;
+      } finally {
+        client.release();
+      }
     },
   );
 

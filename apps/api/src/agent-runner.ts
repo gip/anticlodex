@@ -3,19 +3,12 @@ import { dirname, isAbsolute, join, normalize, posix, relative, resolve } from "
 import { fileURLToPath } from "node:url";
 import { query } from "./db.js";
 import { claimNextAgentRun, updateAgentRunResult } from "./agent-queue.js";
+import type { OpenShipBundleFile } from "./openship-sync.js";
 import {
-  applyOpenShipBundleToThreadSystem,
-  collectOpenShipBundleFiles,
-  type OpenShipBundleFile,
-} from "./openship-sync.js";
-import {
-  diffOpenShipSnapshots,
   type AgentRunPlanChange,
   resolveThreadWorkspacePath,
   runAgent,
   type AgentRunResult,
-  snapshotOpenShipBundle,
-  summarizeOpenShipBundleChanges,
 } from "@acx/agent-runtime";
 import {
   compareUtf8,
@@ -596,74 +589,6 @@ export async function generateOpenShipFileBundle(threadId: string, workspace: st
 
 type QueueStatus = "success" | "failed";
 
-interface OpenShipBundleCandidate {
-  path: string;
-}
-
-async function isDirectory(value: string): Promise<boolean> {
-  try {
-    const maybeDir = await stat(value);
-    return maybeDir.isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-async function findOpenShipBundleDirectory(workspace: string): Promise<string> {
-  const preferred = join(workspace, "openship");
-  if (await isDirectory(preferred)) {
-    console.info("[agent-runner] bundle directory resolved", {
-      workspace,
-      openShipBundleDir: preferred,
-      reason: "workspace/openship exists",
-    });
-    return preferred;
-  }
-
-  const queue: OpenShipBundleCandidate[] = [{ path: workspace }];
-  const visited = new Set<string>([workspace]);
-
-  while (queue.length > 0) {
-    const current = queue.shift();
-    if (!current) break;
-
-    const entries = await readdir(current.path, { withFileTypes: true }).catch(() => null);
-    if (!entries) continue;
-
-    const hasManifest = entries.some(
-      (entry) => entry.isFile() && entry.name === OPENSHIP_MANIFEST_FILE_NAME,
-    );
-    if (hasManifest) {
-      console.info("[agent-runner] bundle directory resolved", {
-        workspace,
-        openShipBundleDir: current.path,
-        reason: "openship.yaml found",
-      });
-      return current.path;
-    }
-
-    const childDirs = entries
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => ({ path: join(current.path, entry.name) }))
-      .filter((entry) => !visited.has(entry.path))
-      .filter((entry) => !entry.path.includes(`${"/.git/"}`))
-      .filter((entry) => !entry.path.includes(`${"/node_modules/"}`))
-      .sort((left, right) => left.path.localeCompare(right.path));
-
-    for (const childDir of childDirs) {
-      visited.add(childDir.path);
-      queue.push(childDir);
-    }
-  }
-
-  console.info("[agent-runner] bundle directory resolved", {
-    workspace,
-    openShipBundleDir: workspace,
-    reason: "no openship container found; using workspace fallback",
-  });
-  return workspace;
-}
-
 interface RunClaudeAgentResult {
   status: QueueStatus;
   messages: string[];
@@ -901,155 +826,6 @@ async function runOpenShipV1AgentWithWorkspace(
   }
 }
 
-async function runClaudeAgentWithBundleDiff(
-  runPrompt: string,
-  systemPrompt: string | null,
-  workspace: string,
-  threadId: string,
-  model: string | undefined,
-): Promise<RunClaudeAgentResult> {
-  const openShipBundleDir = join(workspace, OPENSHIP_BUNDLE_DIR_NAME);
-  console.info("[agent-runner] bundle generation start", {
-    threadId,
-    workspace,
-    openShipBundleDir,
-  });
-
-  try {
-    await generateOpenShipFileBundle(threadId, workspace);
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      status: "failed",
-      messages: [`OpenShip pre-run generation failed: ${message}`],
-      changes: [],
-      error: message,
-      openShipBundleFiles: [],
-    };
-  }
-
-  const preRunDir = await findOpenShipBundleDirectory(workspace);
-  console.info("[agent-runner] bundle pre-run snapshot start", {
-    openShipBundleDir: preRunDir,
-    workspace,
-  });
-  const before = await snapshotOpenShipBundle(preRunDir);
-  if (before.length === 0) {
-    console.warn("[agent-runner] pre-run bundle empty", {
-      openShipBundleDir: preRunDir,
-    });
-  }
-  let runResult: RunClaudeAgentResult;
-  try {
-    console.info("[agent-runner] invoking agent", {
-      threadId,
-      openShipBundleDir,
-      workspace,
-      systemPrompt,
-      model,
-    });
-    const result = await runAgent({
-      prompt: runPrompt,
-      cwd: workspace,
-      model,
-      systemPrompt: systemPrompt ?? undefined,
-      allowedTools: ["Read", "Grep", "Glob", "Bash", "Edit", "Write"],
-    });
-    runResult = {
-      status: result.status,
-      messages: result.messages,
-      changes: result.changes,
-      error: result.error,
-      openShipBundleFiles: [],
-    };
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    runResult = {
-      status: "failed",
-      messages: [`Execution failed: ${error instanceof Error ? error.message : String(error)}`],
-      changes: [],
-      error: message,
-      openShipBundleFiles: [],
-    };
-  }
-
-  const after = await snapshotOpenShipBundle(preRunDir);
-  const fileChanges = diffOpenShipSnapshots(before, after);
-
-  if (fileChanges.length === 0) {
-    console.info("[agent-runner] OpenShip bundle diff result", {
-      threadId,
-      openShipBundleDir: preRunDir,
-      changed: 0,
-      message: "No files changed in OpenShip bundle.",
-    });
-  } else {
-    console.info("[agent-runner] OpenShip bundle diff result", {
-      threadId,
-      openShipBundleDir: preRunDir,
-      changed: fileChanges.length,
-      changes: fileChanges,
-    });
-  }
-
-  if (runResult.changes.length === 0) {
-    runResult.changes = fileChanges;
-  } else if (fileChanges.length > 0) {
-    runResult.changes = [...runResult.changes, ...fileChanges];
-  }
-
-  const summary = summarizeOpenShipBundleChanges(fileChanges);
-  runResult.messages = [
-    ...runResult.messages,
-    summary,
-  ];
-
-  let openShipBundleFiles: OpenShipBundleFile[] = [];
-  if (runResult.status === "success" && fileChanges.length > 0) {
-    try {
-      openShipBundleFiles = await collectOpenShipBundleFiles(preRunDir);
-    } catch (error: unknown) {
-      return {
-        status: "failed",
-        messages: [...runResult.messages, `OpenShip reconciliation snapshot failed: ${runSummaryError(error)}`],
-        changes: runResult.changes,
-        error: runSummaryError(error),
-        openShipBundleFiles: [],
-      };
-    }
-  }
-
-  return {
-    ...runResult,
-    openShipBundleFiles,
-  };
-}
-
-async function applyOpenShipBundleResult(
-  threadId: string,
-  result: RunClaudeAgentResult,
-): Promise<RunClaudeAgentResult> {
-  if (result.status !== "success" || result.openShipBundleFiles.length === 0) {
-    return result;
-  }
-
-  try {
-    await applyOpenShipBundleToThreadSystem({
-      threadId,
-      bundleFiles: result.openShipBundleFiles,
-    });
-  } catch (error: unknown) {
-    return {
-      status: "failed",
-      messages: [...result.messages, `OpenShip reconciliation failed: ${runSummaryError(error)}`],
-      changes: result.changes,
-      error: runSummaryError(error),
-      openShipBundleFiles: [],
-    };
-  }
-
-  return result;
-}
 async function runAgentAndApplyResult(
   runPrompt: string,
   systemPrompt: string | null,

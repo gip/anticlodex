@@ -42,15 +42,15 @@ function normalizeApiUrl(raw: string): string {
   return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
 }
 
-function isNumericThreadRouteId(threadId: string): boolean {
-  return /^\d+$/.test(threadId.trim());
-}
-
 function appendProjectScope(path: string, projectId: string | null): string {
   if (!projectId) return path;
   const separator = path.includes("?") ? "&" : "?";
   return `${path}${separator}projectId=${encodeURIComponent(projectId)}`;
 }
+
+// Thread events arrive in bursts (a run start plus its claim, a batch of matrix
+// writes). Collapse a burst into a single re-read on the trailing edge.
+const THREAD_REFRESH_DEBOUNCE_MS = 250;
 
 const API_URL = normalizeApiUrl(import.meta.env.VITE_API_URL ?? "http://localhost:3001");
 
@@ -108,14 +108,6 @@ interface V1ProjectSettingsPayload {
   projectRoles: string[];
   concerns: Concern[];
   collaborators: Collaborator[];
-}
-
-interface V1RunStartResponse {
-  runId?: string;
-  status?: "queued" | "running" | "success" | "failed" | "cancelled";
-  mode?: "direct" | "plan";
-  threadId?: string;
-  systemId?: string;
 }
 
 interface V1EventItem {
@@ -227,33 +219,6 @@ function normalizeThread(row: V1ThreadListItem): {
     sourceThreadId: row.sourceThreadId,
     updatedAt: row.updatedAt,
     createdAt: row.createdAt,
-  };
-}
-
-function toThreadDetailFromSummary(
-  row: {
-    id: string;
-    title: string | null;
-    description: string | null;
-    status: "open" | "closed" | "committed";
-    createdAt?: string;
-    createdByHandle?: string;
-    ownerHandle?: string;
-    projectName?: string;
-    accessRole?: string;
-  },
-  project: V1ProjectListItem,
-): ThreadDetail {
-  return {
-    id: row.id,
-    title: row.title ?? "Thread",
-    description: row.description,
-    status: row.status,
-    createdAt: row.createdAt ?? new Date().toISOString(),
-    createdByHandle: row.createdByHandle ?? project.ownerHandle,
-    ownerHandle: row.ownerHandle ?? project.ownerHandle,
-    projectName: row.projectName ?? project.name,
-    accessRole: row.accessRole ?? project.accessRole,
   };
 }
 
@@ -1412,71 +1377,64 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
   const eventStreamAbortRef = useRef<AbortController | null>(null);
   const eventPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventRefreshPromiseRef = useRef<Promise<void> | null>(null);
+  const eventRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [integrationStatuses, setIntegrationStatuses] = useState<IntegrationStatusRecord>({
     notion: "disconnected",
     google: "disconnected",
   });
 
-  useEffect(() => {
-    if (!isAuthenticated || !handle || !projectName) {
-      setThreadProjectId(null);
-      return;
-    }
-    setThreadProjectId(null);
-    let cancelled = false;
-    resolveProject(apiFetch, handle, projectName)
-      .then((projectRecord) => {
-        if (!cancelled) setThreadProjectId(projectRecord?.id ?? null);
-      })
-      .catch(() => {
-        if (!cancelled) setThreadProjectId(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [apiFetch, handle, isAuthenticated, projectName]);
-
   const threadPathWithScope = useCallback((suffix = ""): string | null => {
     if (!threadId) return null;
     const path = `/threads/${encodeURIComponent(threadId)}${suffix}`;
-    return appendProjectScope(path, threadProjectId);
-  }, [threadId, threadProjectId]);
+    return appendThreadScope(path, threadProjectId, handle, projectName);
+  }, [handle, projectName, threadId, threadProjectId]);
 
   const resolveThreadProjectId = useCallback(async (): Promise<string | null> => {
     if (threadProjectId) return threadProjectId;
+    if (detail?.thread.projectId) return detail.thread.projectId;
     if (!handle || !projectName) return null;
     const projectRecord = await resolveProject(apiFetch, handle, projectName);
     const resolved = projectRecord?.id ?? null;
     if (resolved) setThreadProjectId(resolved);
     return resolved;
-  }, [apiFetch, handle, projectName, threadProjectId]);
+  }, [apiFetch, detail?.thread.projectId, handle, projectName, threadProjectId]);
 
   const refreshThread = useCallback(async () => {
-    if (!threadId) return;
-    if (isNumericThreadRouteId(threadId) && !threadProjectId) return;
     const scopedPath = threadPathWithScope();
     if (!scopedPath) return;
     const threadRes = await apiFetch(scopedPath);
     if (!threadRes.ok) return;
     const nextDetail = (await threadRes.json()) as ThreadDetailPayload;
     setDetail(nextDetail);
-  }, [apiFetch, threadId, threadPathWithScope, threadProjectId]);
+    setThreadProjectId(nextDetail.thread.projectId ?? null);
+  }, [apiFetch, threadPathWithScope]);
 
+  // This used to be an in-flight guard, which dropped every event that arrived
+  // while a refresh was running -- a change committed just after a read started
+  // was never picked up. A trailing edge collapses a burst into one request and
+  // still guarantees a read after the last event in it. The chaining keeps two
+  // responses from landing out of order and leaving stale detail on screen.
   const refreshThreadDebounced = useCallback(() => {
-    if (eventRefreshPromiseRef.current) return;
-    const refresh = (async () => {
-      try {
-        await refreshThread();
-      } catch (error) {
-        console.error("Thread refresh failed:", error);
-      } finally {
+    if (eventRefreshTimerRef.current) clearTimeout(eventRefreshTimerRef.current);
+    eventRefreshTimerRef.current = setTimeout(() => {
+      eventRefreshTimerRef.current = null;
+      const refresh = (eventRefreshPromiseRef.current ?? Promise.resolve())
+        .then(() => refreshThread())
+        .catch((error: unknown) => {
+          console.error("Thread refresh failed:", error);
+        });
+      eventRefreshPromiseRef.current = refresh;
+      void refresh.finally(() => {
         if (eventRefreshPromiseRef.current === refresh) {
           eventRefreshPromiseRef.current = null;
         }
-      }
-    })();
-    eventRefreshPromiseRef.current = refresh;
+      });
+    }, THREAD_REFRESH_DEBOUNCE_MS);
   }, [refreshThread]);
+
+  useEffect(() => () => {
+    if (eventRefreshTimerRef.current) clearTimeout(eventRefreshTimerRef.current);
+  }, []);
 
   const handleThreadEvent = useCallback(
     async (event: V1EventItem) => {
@@ -1506,6 +1464,15 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
       console.error("Failed to process v1 event:", error);
     }
   }, [handleThreadEvent]);
+
+  // The stream effect reads the handler through a ref. Depending on the callback
+  // itself tore the connection down and rebuilt it every time thread state
+  // changed, and each reconnect restarted from a null cursor and replayed the
+  // last hundred events -- every matching one triggering another refetch.
+  const processEventPayloadRef = useRef(processEventPayload);
+  useEffect(() => {
+    processEventPayloadRef.current = processEventPayload;
+  }, [processEventPayload]);
 
   useEffect(() => {
     if (!isAuthenticated || !threadId) return;
@@ -1545,7 +1512,7 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
             };
             const items = payload.items ?? [];
             for (const event of items) {
-              await processEventPayload(event);
+              await processEventPayloadRef.current(event);
             }
             if (items.length > 0) {
               eventCursorRef.current = payload.nextCursor ?? eventCursorFromItem(items[items.length - 1] as V1EventItem);
@@ -1612,7 +1579,7 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
                   const eventData = JSON.parse(packet.data) as V1EventItem;
                   eventData.id = packet.id || eventCursorFromItem(eventData);
                   eventCursorRef.current = eventData.id;
-                  await processEventPayload(eventData);
+                  await processEventPayloadRef.current(eventData);
                 } catch (parseError) {
                   console.error("Failed to parse SSE packet:", parseError);
                 }
@@ -1653,7 +1620,7 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
       stopPolling();
       pollingOnly = true;
     };
-  }, [apiFetch, handleThreadEvent, isAuthenticated, processEventPayload, threadId]);
+  }, [apiFetch, isAuthenticated, threadId]);
 
   const refreshIntegrationStatuses = useCallback(async () => {
     const nextStatuses: IntegrationStatusRecord = {
@@ -1696,19 +1663,24 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
 
   useEffect(() => {
     if (!isAuthenticated || !threadId) return;
-    if (isNumericThreadRouteId(threadId) && !threadProjectId) return;
 
     setNotFound(false);
     setDetail(null);
+    setThreadProjectId(null);
+    let cancelled = false;
 
-    const scopedPath = threadPathWithScope();
-    if (!scopedPath) {
-      setNotFound(true);
-      return;
-    }
+    // Scoped by handle/projectName rather than by threadProjectId, so this does
+    // not re-run when the project id arrives in the response.
+    const scopedPath = appendThreadScope(
+      `/threads/${encodeURIComponent(threadId)}`,
+      null,
+      handle,
+      projectName,
+    );
 
     apiFetch(scopedPath)
       .then(async (res) => {
+        if (cancelled) return;
         if (res.status === 404) {
           setNotFound(true);
           return;
@@ -1716,10 +1688,19 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
         if (!res.ok) {
           throw new Error(await readError(res, "Failed to load thread"));
         }
-        setDetail(await res.json());
+        const payload = (await res.json()) as ThreadDetailPayload;
+        if (cancelled) return;
+        setDetail(payload);
+        setThreadProjectId(payload.thread.projectId ?? null);
       })
-      .catch(() => setNotFound(true));
-  }, [isAuthenticated, threadId, apiFetch, threadPathWithScope, threadProjectId]);
+      .catch(() => {
+        if (!cancelled) setNotFound(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, threadId, apiFetch, handle, projectName]);
 
   if (notFound) {
     return (
@@ -1837,6 +1818,22 @@ function ThreadRoute({ isAuthenticated, onProjectMutated }: { isAuthenticated: b
         const data = (await res.json()) as MatrixRefMutationResponse;
         setDetail((prev) => (prev ? applyMatrixMutationResponse(prev, data) : prev));
         return data;
+      }}
+      onLoadDocumentText={async (documentHash) => {
+        const scopedPath = threadPathWithScope(`/matrix/documents/${encodeURIComponent(documentHash)}`);
+        if (!scopedPath) return null;
+        const res = await apiFetch(scopedPath);
+        if (!res.ok) return null;
+        const data = (await res.json()) as { document: { text: string } };
+        return data.document.text;
+      }}
+      onSearchDocumentText={async (searchQuery) => {
+        const scopedPath = threadPathWithScope(`/matrix/documents?q=${encodeURIComponent(searchQuery)}`);
+        if (!scopedPath) return null;
+        const res = await apiFetch(scopedPath);
+        if (!res.ok) return null;
+        const data = (await res.json()) as { hashes: string[] };
+        return data.hashes;
       }}
       onCreateMatrixDocument={async (payload: MatrixDocumentCreateInput) => {
         const scopedPath = threadPathWithScope("/matrix/documents");

@@ -3,7 +3,9 @@
   "private": true,
   "scripts": {
     "pretest": "openship verify-skill skills/openship",
-    "test": "pnpm --filter @acx/api test",
+    "test": "pnpm --filter @acx/api --filter @acx/ui test",
+    "lint": "biome lint .",
+    "lint:fix": "biome lint --write .",
     "openship:skill": "openship verify-skill skills/openship",
     "dev:web": "pnpm --filter @acx/web dev",
     "dev:api": "pnpm --filter @acx/api dev",
@@ -15,9 +17,10 @@
     "migrate": "pnpm --filter @acx/api migrate"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.10",
     "@openship/protocol": "0.0.1",
-    "typescript": "^5.7.3",
-    "@types/node": "^22.13.1"
+    "@types/node": "^22.20.1",
+    "typescript": "^5.9.3"
   },
   "engines": {
     "node": ">=22.11"

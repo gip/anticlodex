@@ -80,7 +80,9 @@ export async function submitOpenShipChanges(input: {
   const capability = changesCapability(input.discovery);
   const headers = new Headers({ "Content-Type": "application/json", Accept: "application/json" });
   const adapted = await input.adapter?.headersFor({ url: capability.submit, method: "POST" });
-  new Headers(adapted).forEach((value, key) => headers.set(key, value));
+  new Headers(adapted).forEach((value, key) => {
+    headers.set(key, value);
+  });
   const providerResponse = await fetch(capability.submit, { method: "POST", headers, body: JSON.stringify(submission), credentials: "omit" });
   const body = await responseBody(providerResponse);
   if ([401, 402, 403].includes(providerResponse.status)) {
@@ -119,7 +121,9 @@ export async function pollOpenShipChange(input: {
   if (!input.change.statusUrl) throw new Error("This Changes record has no public status URL.");
   const headers = new Headers({ Accept: "application/json" });
   const adapted = await input.adapter?.headersFor({ url: input.change.statusUrl, method: "GET" });
-  new Headers(adapted).forEach((value, key) => headers.set(key, value));
+  new Headers(adapted).forEach((value, key) => {
+    headers.set(key, value);
+  });
   const response = await fetch(input.change.statusUrl, { headers, credentials: "omit" });
   const body = await responseBody(response);
   let next: OpenShipRemoteChange;

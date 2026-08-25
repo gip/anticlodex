@@ -3,7 +3,7 @@ import { mkdir, readdir, readFile, stat } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import { type Query, type SDKMessage, query } from "@anthropic-ai/claude-agent-sdk";
-import { type CodexOptions } from "@openai/codex-sdk";
+import type { CodexOptions } from "@openai/codex-sdk";
 
 type AgentRunStatus = "success" | "failed";
 
@@ -81,14 +81,6 @@ interface BaseRunAgentInput {
 export interface RunClaudeAgentInput extends BaseRunAgentInput {
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null ? value as Record<string, unknown> : null;
-}
-
-function isFunction(value: unknown): value is (...args: unknown[]) => unknown {
-  return typeof value === "function";
-}
-
 function isAsyncIterable<T>(value: unknown): value is AsyncIterable<T> {
   return typeof value === "object" && value !== null && typeof (value as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === "function";
 }
@@ -97,19 +89,6 @@ function normalizeCodexError(error: unknown): string {
   if (error instanceof Error) return error.message || "Unknown codex execution error.";
   if (typeof error === "string") return error;
   return "Unknown codex execution error.";
-}
-
-type CodexInvocationFailure = {
-  name: string;
-  error: string;
-};
-
-function isCodexDebugEnabled(): boolean {
-  return (
-    process.env.ACX_DEBUG_CODEX === "1"
-    || process.env.ACX_DEBUG_CODEx === "1"
-    || process.env.ACX_DEBUG_AGENT_RUNTIME === "1"
-  );
 }
 
 async function runCodexAgent(input: BaseRunAgentInput): Promise<AgentRunResult> {
@@ -279,7 +258,7 @@ const DEFAULT_IGNORE_DIRECTORY_NAMES = new Set([
 
 const DEFAULT_IGNORE_FILE_PATTERNS = [
   /^\._/,            // macOS resource fork files
-  /^\~/,             // editor backup names
+  /^~/,              // editor backup names
   /~$/,              // editor backup suffix
   /\.swp$/i,         // vim swap files
   /\.tmp$/i,         // temp files

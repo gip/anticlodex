@@ -15,6 +15,7 @@ import {
 import pool, { query } from "../db.js";
 import { generateOpenShipFileBundle } from "../agent-runner.js";
 import { verifyAuth, verifyOptionalAuth, type AuthUser } from "../auth.js";
+import { SQL_LIKE_ESCAPE_CHARACTER, toLikeContainsPattern } from "../sql-like.js";
 import {
   claimAgentRunById,
   enqueueAgentRunWithWait,
@@ -31,7 +32,6 @@ import {
   queryEvents,
   encodeCursor,
   parseCursor,
-  type ACXEvent,
 } from "../events.js";
 import {
   BLANK_TEMPLATE_ID,
@@ -320,31 +320,6 @@ interface V1RunChatMessage {
   createdAt: string;
 }
 
-interface V1RunFileChange {
-  kind: "Create" | "Update" | "Delete";
-  path: string;
-  fromHash?: string;
-  toHash?: string;
-}
-
-type V1RunResultStatus = "queued" | "running" | "success" | "failed" | "cancelled";
-
-interface V1RunResponse {
-  runId: string;
-  status: V1RunResultStatus;
-  mode: AssistantMode;
-  threadId: string;
-  systemId: string;
-  filesChanged: V1RunFileChange[];
-  summary: {
-    status: "success" | "failed" | "cancelled" | "queued" | "running";
-    messages: string[];
-  };
-  changesCount: number;
-  messages: V1RunChatMessage[];
-  threadState?: Record<string, unknown>;
-}
-
 interface V1OpenShipBundleFile {
   path: string;
   content: string;
@@ -409,7 +384,7 @@ interface V1ProjectThreadConcernRow {
   position: number;
 }
 
-interface V1ProjectThreadDocumentRow {
+interface V1ThreadDocumentMetadataRow {
   hash: string;
   kind: string;
   title: string;
@@ -419,6 +394,9 @@ interface V1ProjectThreadDocumentRow {
   source_external_id: string | null;
   source_metadata: Record<string, unknown> | null;
   source_connected_user_id: string | null;
+}
+
+interface V1ProjectThreadDocumentRow extends V1ThreadDocumentMetadataRow {
   text: string;
 }
 
@@ -516,6 +494,11 @@ interface V1ThreadPatchBody {
 
 interface V1ThreadScopeQuerystring {
   projectId?: string;
+  // A numeric threadId is only unique within a project, so it needs a scope. A
+  // client that routes by /:handle/:projectName/:threadId can pass the handle and
+  // project name straight through instead of first resolving them to a projectId.
+  handle?: string;
+  projectName?: string;
 }
 
 interface V1RunClaimBody {
@@ -968,49 +951,33 @@ type ThreadAccessResolution =
   | { kind: "ambiguous_project_thread_id" }
   | { kind: "not_found" };
 
+type ProjectThreadScope =
+  | { kind: "id"; projectId: string }
+  | { kind: "slug"; handle: string; projectName: string };
+
+function parseProjectSlugScope(scope: V1ThreadScopeQuerystring): ProjectThreadScope | null {
+  const handle = typeof scope.handle === "string" ? scope.handle.trim() : "";
+  const projectName = typeof scope.projectName === "string" ? scope.projectName.trim() : "";
+  if (!handle || !projectName) return null;
+  return { kind: "slug", handle, projectName };
+}
+
 async function resolveThreadAccessByProjectThreadId(
   projectThreadId: number,
   viewerUserId: string | null,
-  projectId: string | null,
+  scope: ProjectThreadScope | null,
 ): Promise<ThreadAccessResolution> {
-  if (projectId) {
-    const result = await query<V1ThreadRow>(
-      `SELECT *
-         FROM (
-           SELECT
-             t.id,
-             t.project_id,
-             t.title,
-             t.description,
-             t.status,
-             t.created_at,
-             t.updated_at,
-             t.source_thread_id,
-             COALESCE(NULLIF(pc.role::text, ''),
-               CASE
-                 WHEN p.owner_id = CAST($2 AS uuid) THEN 'Owner'
-                 WHEN p.visibility = 'public' THEN 'Viewer'
-                 ELSE NULL
-               END
-             )::text AS access_role
-           FROM threads t
-           JOIN projects p ON p.id = t.project_id
-           LEFT JOIN project_collaborators pc
-             ON pc.project_id = p.id
-            AND pc.user_id = CAST($2 AS uuid)
-           WHERE t.project_thread_id = $1
-             AND t.project_id = $3
-             AND p.is_archived = false
-         ) accessible
-        WHERE accessible.access_role IS NOT NULL
-        LIMIT 1`,
-      [projectThreadId, viewerUserId, projectId],
-    );
-
-    if (result.rowCount === 0) return { kind: "not_found" };
-    return { kind: "found", thread: result.rows[0] };
+  const params: unknown[] = [projectThreadId, viewerUserId];
+  let scopeClause = "";
+  if (scope?.kind === "id") {
+    scopeClause = `AND t.project_id = $${params.push(scope.projectId)}`;
+  } else if (scope?.kind === "slug") {
+    scopeClause = `AND p.name = $${params.push(scope.projectName)}
+             AND owner_u.handle = $${params.push(scope.handle)}`;
   }
 
+  // Unscoped lookups take two rows so an id that matches several accessible
+  // projects can be reported as ambiguous rather than resolving arbitrarily.
   const result = await query<V1ThreadRow>(
     `SELECT *
        FROM (
@@ -1032,15 +999,17 @@ async function resolveThreadAccessByProjectThreadId(
            )::text AS access_role
          FROM threads t
          JOIN projects p ON p.id = t.project_id
+         JOIN users owner_u ON owner_u.id = p.owner_id
          LEFT JOIN project_collaborators pc
            ON pc.project_id = p.id
           AND pc.user_id = CAST($2 AS uuid)
          WHERE t.project_thread_id = $1
            AND p.is_archived = false
+           ${scopeClause}
        ) accessible
       WHERE accessible.access_role IS NOT NULL
-      LIMIT 2`,
-    [projectThreadId, viewerUserId],
+      LIMIT ${scope ? 1 : 2}`,
+    params,
   );
 
   const rowCount = result.rowCount ?? 0;
@@ -1061,7 +1030,7 @@ function parseV1ThreadRouteId(raw: string): V1ThreadRouteId | null {
 async function resolveThreadAccessByRequestParam(
   rawThreadId: string,
   viewerUserId: string | null,
-  rawProjectId: unknown,
+  scope: V1ThreadScopeQuerystring,
 ): Promise<ThreadAccessResolution> {
   const parsed = parseV1ThreadRouteId(rawThreadId);
   if (!parsed) return { kind: "invalid_thread_id" };
@@ -1071,9 +1040,13 @@ async function resolveThreadAccessByRequestParam(
     return byUuid ? { kind: "found", thread: byUuid } : { kind: "not_found" };
   }
 
-  const parsedProjectId = parseOptionalProjectId(rawProjectId);
+  const parsedProjectId = parseOptionalProjectId(scope.projectId);
   if (parsedProjectId === "invalid") return { kind: "invalid_project_id" };
-  return resolveThreadAccessByProjectThreadId(parsed.projectThreadId, viewerUserId, parsedProjectId);
+  return resolveThreadAccessByProjectThreadId(
+    parsed.projectThreadId,
+    viewerUserId,
+    parsedProjectId ? { kind: "id", projectId: parsedProjectId } : parseProjectSlugScope(scope),
+  );
 }
 
 function writeThreadAccessFailure(reply: FastifyReply, result: Exclude<ThreadAccessResolution, { kind: "found" }>): void {
@@ -1097,12 +1070,6 @@ function writeThreadAccessFailure(reply: FastifyReply, result: Exclude<ThreadAcc
   notFoundProblem(reply, "Thread not found");
 }
 
-
-function buildPaginationFromQuery(rawPage: unknown, rawPageSize: unknown): V1ListCursor {
-  const page = parsePositiveInt(rawPage, 1, 1, Number.MAX_SAFE_INTEGER);
-  const pageSize = parsePositiveInt(rawPageSize, 50, 1, 200);
-  return { page, pageSize, nextCursor: String(page + 1) };
-}
 
 async function getThreadSystemId(threadId: string): Promise<string | null> {
   const result = await query<{ system_id: string }>(
@@ -1339,6 +1306,14 @@ async function publishThreadMatrixChanged(threadId: string, user: AuthUser, aggr
   }).catch(() => undefined);
 }
 
+const OPTIONAL_AUTH_READ_ROUTES = new Set([
+  "/projects",
+  "/threads",
+  "/threads/:threadId",
+  "/threads/:threadId/matrix/documents",
+  "/threads/:threadId/matrix/documents/:hash",
+]);
+
 export async function v1Routes(app: FastifyInstance) {
   app.setErrorHandler((error: FastifyError, req, reply) => {
     if (error.code === "FST_ERR_CTP_BODY_TOO_LARGE" && req.url.includes("/projects/imports/openship")) {
@@ -1355,14 +1330,12 @@ export async function v1Routes(app: FastifyInstance) {
   });
   app.addHook("preHandler", async (req, reply) => {
     const routeUrl = req.routeOptions.url;
+    // Reads a signed-out visitor may make against a public project. The document
+    // routes belong here because bodies used to ride along with the thread read:
+    // leaving them out would make a public thread unreadable without an account.
     const isOptionalReadRoute = req.method === "GET"
       && (
-        routeUrl === "/projects"
-        || routeUrl === "/v1/projects"
-        || routeUrl === "/threads"
-        || routeUrl === "/v1/threads"
-        || routeUrl === "/threads/:threadId"
-        || routeUrl === "/v1/threads/:threadId"
+        (routeUrl != null && OPTIONAL_AUTH_READ_ROUTES.has(routeUrl.replace(/^\/v1/, "")))
         || routeUrl?.includes("/projects/:handle/:projectName/openship") === true
       );
 
@@ -1436,7 +1409,7 @@ export async function v1Routes(app: FastifyInstance) {
   app.get<{ Querystring: { page?: number; pageSize?: number; name?: string } }>(
     "/projects",
     { config: { anonymousCache: true } },
-    async (req, reply) => {
+    async (req) => {
       const viewerUserId = getOptionalAuthUser(req)?.id ?? null;
       const page = parsePositiveInt(req.query.page, 1, 1, Number.MAX_SAFE_INTEGER);
       const pageSize = parsePositiveInt(req.query.pageSize, 50, 1, 200);
@@ -2600,7 +2573,7 @@ export async function v1Routes(app: FastifyInstance) {
   app.get<{ Querystring: { projectId?: string; page?: number; pageSize?: number } }>(
     "/threads",
     { config: { anonymousCache: true } },
-    async (req, reply) => {
+    async (req) => {
       const viewerUserId = getOptionalAuthUser(req)?.id ?? null;
       const page = parsePositiveInt(req.query.page, 1, 1, Number.MAX_SAFE_INTEGER);
       const pageSize = parsePositiveInt(req.query.pageSize, 50, 1, 200);
@@ -2789,13 +2762,18 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const viewerUserId = getOptionalAuthUser(req)?.id ?? null;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, viewerUserId, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, viewerUserId, req.query);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
       }
       const thread = threadAccess.thread;
       const resolvedThreadId = thread.id;
+
+      // thread_current_system() cannot change within a request, so it is resolved
+      // once here and passed down. Three getThreadSystemId() calls and two inline
+      // subqueries previously resolved the same value five times per read.
+      const systemId = await getThreadSystemId(resolvedThreadId);
 
       const [projectRow, messagesResult, systemTopology, systemEdges, matrixCells, concernRows, matrixDocumentsRows] = await Promise.all([
         query<{ project_name: string; owner_handle: string; creator_handle: string }>(
@@ -2838,39 +2816,37 @@ export async function v1Routes(app: FastifyInstance) {
         query<{ id: string; name: string; kind: string; parent_id: string | null; metadata: Record<string, unknown> }>(
          `SELECT n.id, n.name, n.kind::text AS kind, n.parent_id, n.metadata
             FROM nodes n
-           WHERE n.system_id = (SELECT thread_current_system($1))
+           WHERE n.system_id = $1
            ORDER BY n.id`,
-          [resolvedThreadId],
+          [systemId],
         ),
         query<{ id: string; from_node_id: string; to_node_id: string; type: string; metadata: Record<string, unknown> }>(
           `SELECT e.id, e.from_node_id, e.to_node_id, e.type::text AS type, e.metadata
            FROM edges e
-           WHERE e.system_id = (SELECT thread_current_system($1))
+           WHERE e.system_id = $1
            ORDER BY e.id`,
-          [resolvedThreadId],
+          [systemId],
         ),
-        getThreadSystemId(resolvedThreadId)
-          .then((systemId) => systemId ? loadThreadMatrix(systemId) : Promise.resolve([] as V1ThreadMatrixNodeCell[])),
-        getThreadSystemId(resolvedThreadId).then(async (systemId) =>
-          systemId
-            ? query<V1ProjectThreadConcernRow>(
-                `SELECT name, position FROM concerns WHERE system_id = $1 ORDER BY position`,
-                [systemId],
-              ).then((result) => result.rows)
-            : Promise.resolve([] as V1ProjectThreadConcernRow[]),
-        ),
-        getThreadSystemId(resolvedThreadId).then(async (systemId) =>
-          systemId
-            ? query<V1ProjectThreadDocumentRow>(
-                `SELECT hash, kind::text AS kind, title, language, text, source_type::text AS source_type,
-                        source_url, source_external_id, source_metadata, source_connected_user_id
-                 FROM documents
-                 WHERE system_id = $1
-                 ORDER BY created_at, hash`,
-                [systemId],
-              ).then((result) => result.rows)
-            : Promise.resolve([] as V1ProjectThreadDocumentRow[]),
-        ),
+        systemId ? loadThreadMatrix(systemId) : Promise.resolve([] as V1ThreadMatrixNodeCell[]),
+        systemId
+          ? query<V1ProjectThreadConcernRow>(
+              `SELECT name, position FROM concerns WHERE system_id = $1 ORDER BY position`,
+              [systemId],
+            ).then((result) => result.rows)
+          : Promise.resolve([] as V1ProjectThreadConcernRow[]),
+        // `text` is deliberately not selected here: documents are the largest rows
+        // in the schema and most are not open when a thread loads. Bodies are
+        // fetched per hash from GET /threads/:threadId/matrix/documents/:hash.
+        systemId
+          ? query<V1ThreadDocumentMetadataRow>(
+              `SELECT hash, kind::text AS kind, title, language, source_type::text AS source_type,
+                      source_url, source_external_id, source_metadata, source_connected_user_id
+               FROM documents
+               WHERE system_id = $1
+               ORDER BY created_at, hash`,
+              [systemId],
+            ).then((result) => result.rows)
+          : Promise.resolve([] as V1ThreadDocumentMetadataRow[]),
       ]);
 
       const project = projectRow.rows[0];
@@ -2906,7 +2882,6 @@ export async function v1Routes(app: FastifyInstance) {
             kind: document.kind,
             title: document.title,
             language: document.language,
-            text: document.text,
             sourceType: document.source_type,
             sourceUrl: document.source_url,
             sourceExternalId: document.source_external_id,
@@ -2938,7 +2913,7 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -3006,7 +2981,7 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -3028,7 +3003,7 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -3094,12 +3069,87 @@ export async function v1Routes(app: FastifyInstance) {
     },
   );
 
+  // GET /threads/:threadId returns document metadata without `text`. These two
+  // routes serve the bodies: one document at a time when the UI opens it, and a
+  // hash list when the document picker runs a full-text search. Documents are
+  // content-addressed, so a body fetched by hash is immutable and caches forever.
+  app.get<{ Params: { threadId: string; hash: string }; Querystring: V1ThreadScopeQuerystring }>(
+    "/threads/:threadId/matrix/documents/:hash",
+    { config: { anonymousCache: true } },
+    async (req, reply) => {
+      const viewerUserId = getOptionalAuthUser(req)?.id ?? null;
+      const threadAccess = await resolveThreadAccessByRequestParam(req.params.threadId, viewerUserId, req.query);
+      if (threadAccess.kind !== "found") {
+        writeThreadAccessFailure(reply, threadAccess);
+        return;
+      }
+
+      const systemId = await getThreadSystemId(threadAccess.thread.id);
+      if (!systemId) return notFoundProblem(reply, "Document not found");
+
+      const result = await query<V1ProjectThreadDocumentRow>(
+        `SELECT hash, kind::text AS kind, title, language, text, source_type::text AS source_type,
+                source_url, source_external_id, source_metadata, source_connected_user_id
+         FROM documents
+         WHERE system_id = $1 AND hash = $2`,
+        [systemId, req.params.hash],
+      );
+
+      const document = result.rows[0];
+      if (!document) return notFoundProblem(reply, "Document not found");
+
+      return {
+        document: {
+          hash: document.hash,
+          kind: document.kind,
+          title: document.title,
+          language: document.language,
+          text: document.text,
+          sourceType: document.source_type,
+          sourceUrl: document.source_url,
+          sourceExternalId: document.source_external_id,
+          sourceMetadata: document.source_metadata,
+          sourceConnectedUserId: document.source_connected_user_id,
+        },
+      };
+    },
+  );
+
+  app.get<{ Params: { threadId: string }; Querystring: V1ThreadScopeQuerystring & { q?: string } }>(
+    "/threads/:threadId/matrix/documents",
+    { config: { anonymousCache: true } },
+    async (req, reply) => {
+      const viewerUserId = getOptionalAuthUser(req)?.id ?? null;
+      const threadAccess = await resolveThreadAccessByRequestParam(req.params.threadId, viewerUserId, req.query);
+      if (threadAccess.kind !== "found") {
+        writeThreadAccessFailure(reply, threadAccess);
+        return;
+      }
+
+      const search = typeof req.query.q === "string" ? req.query.q.trim() : "";
+      if (!search) return { hashes: [] };
+
+      const systemId = await getThreadSystemId(threadAccess.thread.id);
+      if (!systemId) return { hashes: [] };
+
+      const result = await query<{ hash: string }>(
+        `SELECT hash FROM documents
+          WHERE system_id = $1 AND text ILIKE $2 ESCAPE '${SQL_LIKE_ESCAPE_CHARACTER}'
+          ORDER BY created_at, hash
+          LIMIT 200`,
+        [systemId, toLikeContainsPattern(search)],
+      );
+
+      return { hashes: result.rows.map((row) => row.hash) };
+    },
+  );
+
   app.patch<{ Params: { threadId: string }; Querystring: V1ThreadScopeQuerystring; Body: V1MatrixPatchBody }>(
     "/threads/:threadId/matrix",
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -3167,7 +3217,7 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -3206,7 +3256,7 @@ export async function v1Routes(app: FastifyInstance) {
     async (req, reply) => {
       const user = (req as V1AuthRequest).auth;
       const threadId = req.params.threadId;
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;
@@ -3306,7 +3356,7 @@ export async function v1Routes(app: FastifyInstance) {
       }
 
 
-      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query.projectId);
+      const threadAccess = await resolveThreadAccessByRequestParam(threadId, user.id, req.query);
       if (threadAccess.kind !== "found") {
         writeThreadAccessFailure(reply, threadAccess);
         return;

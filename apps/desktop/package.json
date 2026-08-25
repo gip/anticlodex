@@ -10,20 +10,20 @@
     "preview": "electron-vite preview"
   },
   "dependencies": {
-    "@workos/authkit-electron": "^0.1.2",
-    "@workos-inc/node": "^10.10.0",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
-    "react-router-dom": "^7.13.0",
     "@acx/agent-runtime": "workspace:*",
-    "@acx/ui": "workspace:*"
+    "@acx/ui": "workspace:*",
+    "@workos-inc/node": "^10.11.0",
+    "@workos/authkit-electron": "^0.1.2",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router-dom": "^7.18.2"
   },
   "devDependencies": {
-    "electron": "^40.4.0",
-    "electron-vite": "^5.0.0",
-    "@vitejs/plugin-react": "^5.1.4",
-    "@types/node": "^22.13.1",
-    "@types/react": "^19.2.4",
-    "@types/react-dom": "^19.2.3"
+    "@types/node": "^22.20.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^40.10.6",
+    "electron-vite": "^5.0.0"
   }
 }

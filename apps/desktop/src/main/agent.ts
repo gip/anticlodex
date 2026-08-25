@@ -332,9 +332,6 @@ function buildRunSummary(changes: AssistantRunCompleteRequest["changes"]): strin
 
 async function completeRun(
   getAccessToken: AccessTokenProvider,
-  handle: string,
-  projectName: string,
-  threadId: string,
   runId: string,
   payload: AssistantRunCompleteRequest,
 ) {
@@ -541,7 +538,7 @@ export async function startAssistantRunLocal(payload: {
         status: "failed",
         reason: snapshotFailure,
       });
-      return await completeRun(getAccessToken, payload.handle, payload.projectName, payload.threadId, payload.runId, {
+      return await completeRun(getAccessToken, payload.runId, {
         status: "failed",
         messages: [...messages, snapshotFailure],
         changes,
@@ -552,7 +549,7 @@ export async function startAssistantRunLocal(payload: {
   }
 
   try {
-    const completionResult = await completeRun(getAccessToken, payload.handle, payload.projectName, payload.threadId, payload.runId, {
+    const completionResult = await completeRun(getAccessToken, payload.runId, {
       status: runResult.status,
       messages,
       changes,

@@ -5,5 +5,6 @@
     "outDir": "dist",
     "noEmit": true
   },
-  "include": ["src", "../../packages/ui/src"]
+  "include": ["src", "../../packages/ui/src"],
+  "exclude": ["**/*.test.ts", "**/*.test.tsx"]
 }

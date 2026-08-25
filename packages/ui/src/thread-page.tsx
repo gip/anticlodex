@@ -1694,12 +1694,10 @@ export function ThreadPage({
   const [activeMatrixMutation, setActiveMatrixMutation] = useState("");
   const [chatInput, setChatInput] = useState("");
   const [isSendingChat, setIsSendingChat] = useState(false);
-  // TODO: these three are written by handleSendChat but never rendered, so chat
-  // and assistant failures are currently silent to the user. Keep the state and
-  // surface it in the chat panel rather than dropping the error handling.
-  // biome-ignore lint/correctness/noUnusedVariables: pending a UI surface, see above
+  // Sending a message and running the assistant on it are two steps that fail
+  // separately: the message can be saved and the run still not start. Keeping
+  // the errors apart lets the panel say which half went wrong.
   const [chatError, setChatError] = useState("");
-  // biome-ignore lint/correctness/noUnusedVariables: pending a UI surface, see above
   const [assistantError, setAssistantError] = useState("");
   const [assistantSummaryStatus, setAssistantSummaryStatus] = useState<AssistantRunSummaryStatus | null>(null);
   const [selectedAgentModel, setSelectedAgentModel] = useState<AssistantModel>(() =>
@@ -4180,6 +4178,11 @@ export function ThreadPage({
                 ))
               )}
             </div>
+
+            {/* role="alert" because these appear after the user has already
+                looked away from the send button, waiting on the assistant. */}
+            {chatError && <p className="field-error" role="alert">{chatError}</p>}
+            {assistantError && <p className="field-error" role="alert">{assistantError}</p>}
 
             {effectiveCanEdit ? (
               <div className="thread-chat-form">

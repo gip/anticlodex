@@ -48,6 +48,23 @@ function appendProjectScope(path: string, projectId: string | null): string {
   return `${path}${separator}projectId=${encodeURIComponent(projectId)}`;
 }
 
+// A numeric thread route id is only unique within a project, so thread requests
+// carry a project scope. Resolving handle/projectName to a project id used to
+// mean downloading the whole project list first, with the thread request queued
+// behind it; the scope now travels on the request itself and the project id
+// comes back in the response.
+function appendThreadScope(
+  path: string,
+  projectId: string | null,
+  handle: string | undefined,
+  projectName: string | undefined,
+): string {
+  if (projectId) return appendProjectScope(path, projectId);
+  if (!handle || !projectName) return path;
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}handle=${encodeURIComponent(handle)}&projectName=${encodeURIComponent(projectName)}`;
+}
+
 // Thread events arrive in bursts (a run start plus its claim, a batch of matrix
 // writes). Collapse a burst into a single re-read on the trailing edge.
 const THREAD_REFRESH_DEBOUNCE_MS = 250;

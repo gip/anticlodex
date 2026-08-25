@@ -1,15 +1,20 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { Link } from "./link";
 import { useScheme, SCHEMES } from "./scheme";
 import type { IntegrationConnectionStatus, IntegrationProvider, IntegrationStatusRecord } from "./thread-page";
 
 type MutationError = { error: string };
-type MutationResult<T> = T | MutationError | void;
+// A host can answer with a notice instead of a result when the work continues
+// somewhere else -- the desktop app hands the OAuth flow to the system browser.
+type MutationNotice = { notice: string };
+type MutationResult<T> = T | MutationError | MutationNotice | void;
 
 export interface SettingsPageProps {
   returnTo?: string;
   integrationStatuses?: IntegrationStatusRecord;
+  /** Surfaced when the host lands back from a failed OAuth round trip. */
+  integrationMessage?: string;
   onConnectIntegration: (provider: IntegrationProvider, returnTo: string) => Promise<MutationResult<{ status: IntegrationConnectionStatus }>>;
   onDisconnectIntegration: (provider: IntegrationProvider) => Promise<MutationResult<{ status: IntegrationConnectionStatus }>>;
 }
@@ -22,16 +27,22 @@ const INTEGRATION_LABELS: Record<IntegrationProvider, string> = {
 const INTEGRATION_PROVIDERS = ["notion", "google"] as const;
 
 function getStatusLabel(status?: IntegrationConnectionStatus) {
-  if (!status) return "Disconnected";
   if (status === "connected") return "Connected";
-  return `Disconnected (${status})`;
+  if (status === "needs_reauth") return "Reconnect needed";
+  if (status === "expired") return "Session expired — reconnect";
+  return "Not connected";
 }
 
 const getErrorMessage = (result: MutationResult<{ status: IntegrationConnectionStatus }>) => {
   if (!result || typeof result !== "object") return null;
-  const hasError = "error" in result && result !== null;
-  const rawError = hasError ? (result as MutationError).error : null;
+  const rawError = "error" in result ? (result as MutationError).error : null;
   return typeof rawError === "string" ? rawError : null;
+};
+
+const getNoticeMessage = (result: MutationResult<{ status: IntegrationConnectionStatus }>) => {
+  if (!result || typeof result !== "object") return null;
+  const rawNotice = "notice" in result ? (result as MutationNotice).notice : null;
+  return typeof rawNotice === "string" ? rawNotice : null;
 };
 
 function IntegrationRow({
@@ -48,6 +59,7 @@ function IntegrationRow({
   onDisconnect: () => Promise<void>;
 }) {
   const isConnected = status === "connected";
+  const needsReconnect = status === "needs_reauth" || status === "expired";
   return (
     <div className="profile-integration-row">
       <div>
@@ -60,7 +72,15 @@ function IntegrationRow({
         onClick={isConnected ? onDisconnect : onConnect}
         disabled={isBusy}
       >
-        {isBusy ? (isConnected ? "Disconnecting..." : "Connecting...") : isConnected ? "Disconnect" : "Connect"}
+        {isBusy
+          ? isConnected
+            ? "Disconnecting..."
+            : "Connecting..."
+          : isConnected
+            ? "Disconnect"
+            : needsReconnect
+              ? "Reconnect"
+              : "Connect"}
       </button>
     </div>
   );
@@ -69,34 +89,42 @@ function IntegrationRow({
 export function SettingsPage({
   returnTo = "/settings",
   integrationStatuses = { notion: "disconnected", google: "disconnected" },
+  integrationMessage,
   onConnectIntegration,
   onDisconnectIntegration,
 }: SettingsPageProps) {
   const [activeProvider, setActiveProvider] = useState<IntegrationProvider | null>(null);
   const [integrationError, setIntegrationError] = useState("");
+  const [integrationNotice, setIntegrationNotice] = useState("");
   const { scheme, setScheme } = useScheme();
 
-  const handleConnect = async (provider: IntegrationProvider) => {
+  useEffect(() => {
+    if (integrationMessage) setIntegrationError(integrationMessage);
+  }, [integrationMessage]);
+
+  const runIntegrationAction = async (
+    provider: IntegrationProvider,
+    action: () => Promise<MutationResult<{ status: IntegrationConnectionStatus }>>,
+  ) => {
     setIntegrationError("");
+    setIntegrationNotice("");
     setActiveProvider(provider);
-    const result = await onConnectIntegration(provider, returnTo);
+    const result = await action();
     setActiveProvider(null);
     const error = getErrorMessage(result);
     if (error) {
       setIntegrationError(error);
+      return;
     }
+    const notice = getNoticeMessage(result);
+    if (notice) setIntegrationNotice(notice);
   };
 
-  const handleDisconnect = async (provider: IntegrationProvider) => {
-    setIntegrationError("");
-    setActiveProvider(provider);
-    const result = await onDisconnectIntegration(provider);
-    setActiveProvider(null);
-    const error = getErrorMessage(result);
-    if (error) {
-      setIntegrationError(error);
-    }
-  };
+  const handleConnect = (provider: IntegrationProvider) =>
+    runIntegrationAction(provider, () => onConnectIntegration(provider, returnTo));
+
+  const handleDisconnect = (provider: IntegrationProvider) =>
+    runIntegrationAction(provider, () => onDisconnectIntegration(provider));
 
   return (
     <div className="page settings-page">
@@ -148,6 +176,7 @@ export function SettingsPage({
           ))}
         </div>
         {integrationError ? <p className="field-error">{integrationError}</p> : null}
+        {integrationNotice ? <p className="page-description">{integrationNotice}</p> : null}
       </section>
     </div>
   );

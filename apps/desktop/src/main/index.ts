@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, nativeImage, type WebContents } from "electron";
+import { app, BrowserWindow, ipcMain, nativeImage, shell, type WebContents } from "electron";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -106,6 +106,29 @@ function createWindow() {
     mainWindow = null;
   });
 }
+
+// Provider consent pages must open in the system browser: Google refuses OAuth
+// inside embedded user agents, and navigating the app window away from the
+// renderer leaves the user with no way back.
+const INTEGRATION_AUTH_HOSTS = new Set(["accounts.google.com", "api.notion.com", "www.notion.so"]);
+
+ipcMain.handle("integrations:open-external", async (_event, rawUrl: unknown) => {
+  if (typeof rawUrl !== "string") return { error: "Invalid authorization URL" };
+
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return { error: "Invalid authorization URL" };
+  }
+
+  if (url.protocol !== "https:" || !INTEGRATION_AUTH_HOSTS.has(url.hostname)) {
+    return { error: "Refusing to open an unexpected authorization URL" };
+  }
+
+  await shell.openExternal(url.toString());
+  return { ok: true };
+});
 
 ipcMain.handle("assistant:run", async (_event, payload: {
   handle: string;

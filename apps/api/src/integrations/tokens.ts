@@ -1,8 +1,13 @@
 import { query } from "../db.js";
 import { decryptToken, encryptToken } from "./crypto.js";
+import { isIntegrationNotConfiguredError } from "./errors.js";
 import { getProviderClient, sourceTypeToProvider, type DocSourceType, type IntegrationProvider } from "./index.js";
 
 export type IntegrationReconnectStatus = "disconnected" | "needs_reauth";
+
+// Refresh slightly before the recorded expiry so a token that is about to lapse
+// mid-request is renewed instead of being sent and rejected.
+const EXPIRY_SKEW_MS = 60_000;
 
 export interface IntegrationReconnectError extends Error {
   code: "INTEGRATION_RECONNECT";
@@ -68,7 +73,7 @@ export async function getIntegrationAccessToken(
   }
 
   const isExpired = row.token_expires_at instanceof Date
-    ? row.token_expires_at.getTime() <= Date.now()
+    ? row.token_expires_at.getTime() - EXPIRY_SKEW_MS <= Date.now()
     : false;
   if (!isExpired) {
     return decryptToken(row.access_token_enc);
@@ -99,7 +104,10 @@ export async function getIntegrationAccessToken(
       ],
     );
     return refresh.accessToken;
-  } catch {
+  } catch (error) {
+    // A server misconfiguration is not the user's credentials going bad, so
+    // surface it rather than burning the stored connection.
+    if (isIntegrationNotConfiguredError(error)) throw error;
     await markIntegrationNeedsReauth(userId, provider);
     throw createIntegrationReconnectError(provider, "needs_reauth");
   }

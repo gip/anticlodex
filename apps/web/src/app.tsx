@@ -784,6 +784,7 @@ function AccountSettingsRoute() {
     notion: "disconnected",
     google: "disconnected",
   });
+  const [integrationMessage, setIntegrationMessage] = useState("");
 
   const refreshIntegrationStatuses = useCallback(async () => {
     const nextStatuses: IntegrationStatusRecord = {
@@ -814,12 +815,17 @@ function AccountSettingsRoute() {
     const provider = searchParams.get("integration");
     const status = searchParams.get("integration_status");
     if (!provider || !status) return;
-    if (isAuthenticated) {
+    if (status === "error") {
+      setIntegrationMessage(
+        searchParams.get("integration_error") ?? `Could not connect ${provider}. Please try again.`,
+      );
+    } else if (isAuthenticated) {
       void refreshIntegrationStatuses();
     }
     setSearchParams((params) => {
       params.delete("integration");
       params.delete("integration_status");
+      params.delete("integration_error");
       return params;
     }, { replace: true });
   }, [isAuthenticated, refreshIntegrationStatuses, searchParams, setSearchParams]);
@@ -844,6 +850,7 @@ function AccountSettingsRoute() {
     <SettingsPage
       returnTo="/settings"
       integrationStatuses={integrationStatuses}
+      integrationMessage={integrationMessage}
       onConnectIntegration={async (provider, returnTo) => {
         try {
           const res = await apiFetch(
@@ -1680,6 +1687,7 @@ function ThreadRoute({ onProjectMutated }: { onProjectMutated?: () => void }) {
     setSearchParams((params) => {
       params.delete("integration");
       params.delete("integration_status");
+      params.delete("integration_error");
       return params;
     }, { replace: true });
   }, [isAuthenticated, refreshIntegrationStatuses, searchParams, setSearchParams]);

@@ -4,6 +4,7 @@ import {
   fetchDocumentByUrl as fetchGoogleDocumentByUrl,
   parseSourceUrl as parseGoogleSourceUrl,
   refreshAccessToken as refreshGoogleAccessToken,
+  isGoogleConfigured,
   type ExternalDocumentResult as ExternalGoogleDocumentResult,
   type ExternalTokenResult as ExternalGoogleTokenResult,
   revokeAccessToken as revokeGoogleAccessToken,
@@ -14,6 +15,7 @@ import {
   fetchDocumentByUrl as fetchNotionDocumentByUrl,
   parseSourceUrl as parseNotionSourceUrl,
   refreshAccessToken as refreshNotionAccessToken,
+  isNotionConfigured,
   type ExternalDocumentResult as ExternalNotionDocumentResult,
   type ExternalTokenResult as ExternalNotionTokenResult,
   revokeAccessToken as revokeNotionAccessToken,
@@ -44,8 +46,11 @@ export interface SourceParseResult {
   sourceUrl: string;
 }
 
+export type IntegrationStatus = "connected" | "disconnected" | "expired" | "needs_reauth";
+
 export interface IntegrationProviderClient {
   provider: IntegrationProvider;
+  isConfigured(): boolean;
   buildAuthorizeUrl(state: string, redirectUri: string): Promise<string>;
   exchangeCode(code: string, redirectUri: string): Promise<IntegrationTokenResult>;
   refreshAccessToken(refreshToken: string): Promise<IntegrationTokenResult>;
@@ -80,6 +85,7 @@ function toImportResult(
 
 const googleClient: IntegrationProviderClient = {
   provider: "google",
+  isConfigured: isGoogleConfigured,
   async buildAuthorizeUrl(state, redirectUri) {
     return buildGoogleAuthorizeUrl(state, redirectUri);
   },
@@ -102,6 +108,7 @@ const googleClient: IntegrationProviderClient = {
 
 const notionClient: IntegrationProviderClient = {
   provider: "notion",
+  isConfigured: isNotionConfigured,
   async buildAuthorizeUrl(state, redirectUri) {
     return buildNotionAuthorizeUrl(state, redirectUri);
   },
@@ -133,6 +140,27 @@ export function isIntegrationProvider(value: string): value is IntegrationProvid
 
 export function getProviderClient(provider: IntegrationProvider): IntegrationProviderClient {
   return PROVIDERS[provider];
+}
+
+export const INTEGRATION_PROVIDERS: readonly IntegrationProvider[] = ["notion", "google"];
+
+// A stored row says what we last saw; the live answer also depends on whether
+// the access token has aged out. A row that carries a refresh token stays
+// "connected" past expiry because the next call refreshes it transparently --
+// only a row with nothing left to refresh with needs the user back.
+export function resolveIntegrationStatus(
+  storedStatus: string,
+  tokenExpiresAt: Date | null,
+  hasRefreshToken: boolean,
+): IntegrationStatus {
+  if (storedStatus === "disconnected") return "disconnected";
+  if (storedStatus === "needs_reauth") return "needs_reauth";
+  if (storedStatus === "expired") return "expired";
+  if (storedStatus !== "connected") return "disconnected";
+  if (tokenExpiresAt && tokenExpiresAt.getTime() <= Date.now() && !hasRefreshToken) {
+    return "expired";
+  }
+  return "connected";
 }
 
 export function sourceTypeToProvider(sourceType: Exclude<DocSourceType, "local">): IntegrationProvider {

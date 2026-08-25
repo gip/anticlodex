@@ -7,8 +7,10 @@ import { decryptToken, encryptToken } from "../integrations/crypto.js";
 import {
   getProviderClient,
   isIntegrationProvider,
+  resolveIntegrationStatus,
   type IntegrationProvider,
 } from "../integrations/index.js";
+import { isIntegrationNotConfiguredError } from "../integrations/errors.js";
 
 interface OAuthStateRow {
   user_id: string;
@@ -35,6 +37,7 @@ interface IntegrationAuthorizeQuery {
 interface IntegrationCallbackQuery {
   state?: string;
   code?: string;
+  error?: string;
 }
 
 interface RequestOriginContext {
@@ -47,49 +50,61 @@ function firstHeaderValue(value: string | string[] | undefined): string | null {
   return Array.isArray(value) ? (value[0] ?? null) : value;
 }
 
-function getIntegrationFrontendOrigin(
-  req: RequestOriginContext,
-): string {
-  const explicit = process.env.INTEGRATION_CALLBACK_ORIGIN?.trim();
+// A browsable http(s) origin, or null. Electron renderers loaded from file://
+// send `Origin: null`, which is not a URL and must not be treated as one.
+function toBrowsableOrigin(value: string | null): string | null {
+  if (!value || value === "null") return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+// Where the user should land after the OAuth round trip, or null when the
+// request gives us nothing browsable to return to (the desktop app). Callers
+// fall back to rendering a "you can close this tab" completion page.
+function getIntegrationFrontendOrigin(req: RequestOriginContext): string | null {
+  const explicit = toBrowsableOrigin(process.env.INTEGRATION_CALLBACK_ORIGIN?.trim() ?? null);
   if (explicit) return explicit;
 
-  const headerOrigin = firstHeaderValue(req.headers.origin);
+  const headerOrigin = toBrowsableOrigin(firstHeaderValue(req.headers.origin));
   if (headerOrigin) return headerOrigin;
 
   const referer = firstHeaderValue(req.headers.referer);
   if (referer) {
-    try {
-      return new URL(referer).origin;
-    } catch {
-      // Ignore invalid referer value.
-    }
+    const refererOrigin = toBrowsableOrigin(referer);
+    if (refererOrigin) return refererOrigin;
   }
 
-  return protocolHost(req);
+  return null;
 }
+
+const DESKTOP_RETURN_TO = "app";
 
 function randomState(): string {
   return randomBytes(24).toString("hex");
 }
 
-function sanitizeReturnTo(
+// Exported for tests.
+// Resolves the caller's returnTo against the frontend origin, refusing anything
+// that would send the user to a different site. Returns "" when there is no
+// browsable frontend to return to, which the callback renders as a completion
+// page instead of a redirect.
+export function sanitizeReturnTo(
   raw: string | undefined,
   req: RequestOriginContext,
 ): string {
   const fallbackOrigin = getIntegrationFrontendOrigin(req);
-  if (!raw) return fallbackOrigin;
-  if (raw.length > 1024) return fallbackOrigin;
-
-  if (raw.startsWith("/")) {
-    return new URL(raw, fallbackOrigin).toString();
-  }
+  // `app` is the desktop app's way of saying "there is no web page to return to".
+  if (raw === DESKTOP_RETURN_TO || !fallbackOrigin) return "";
+  if (!raw || raw.length > 1024) return fallbackOrigin;
 
   try {
-    const parsed = new URL(raw);
-    const parsedFallbackOrigin = new URL(fallbackOrigin).origin;
-    if (parsed.origin !== parsedFallbackOrigin) {
-      return fallbackOrigin;
-    }
+    const parsed = new URL(raw, fallbackOrigin);
+    if (parsed.origin !== fallbackOrigin) return fallbackOrigin;
     return parsed.toString();
   } catch {
     return fallbackOrigin;
@@ -120,21 +135,75 @@ export function buildIntegrationCallbackUrl(
   return `${getIntegrationCallbackOrigin(req)}${integrationCallbackPath(provider)}`;
 }
 
-function integrationStatusValue(
-  status: string,
-  tokenExpiresAt: Date | null,
-  hasRefreshToken: boolean,
-): "connected" | "disconnected" | "expired" | "needs_reauth" {
-  if (status === "disconnected") return "disconnected";
-  if (status === "needs_reauth") return "needs_reauth";
-  if (status === "expired") return "expired";
-  if (status === "connected" && tokenExpiresAt && tokenExpiresAt.getTime() <= Date.now()) {
-    return hasRefreshToken ? "needs_reauth" : "expired";
-  }
-  return "connected";
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// Rendered when the OAuth round trip has no web page to return to -- the desktop
+// app sends the user to their system browser, so the browser tab needs an
+// endpoint of its own.
+function renderCompletionPage(provider: IntegrationProvider, message: string, ok: boolean): string {
+  const title = ok ? `${provider} connected` : `${provider} not connected`;
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${escapeHtml(title)}</title>
+    <style>
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0b0b0c; color: #ededed;
+             font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      main { max-width: 28rem; padding: 2rem; text-align: center; }
+      h1 { font-size: 1.125rem; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a1a1a1; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>${escapeHtml(title)}</h1>
+      <p>${escapeHtml(message)}</p>
+      <p>You can close this tab and return to the app.</p>
+    </main>
+  </body>
+</html>`;
+}
+
+async function createOAuthState(
+  userId: string,
+  provider: IntegrationProvider,
+  returnTo: string,
+): Promise<string> {
+  const state = randomState();
+  await query(
+    `INSERT INTO integration_oauth_states (state, user_id, provider, return_to, issued_at, expires_at)
+     VALUES ($1, $2, $3, $4, now(), $5)`,
+    [state, userId, provider, returnTo, new Date(Date.now() + OAUTH_STATE_TTL_MS)],
+  );
+  // Abandoned flows would otherwise accumulate forever; this is cheap and the
+  // expires_at index covers it.
+  await query("DELETE FROM integration_oauth_states WHERE expires_at < now()");
+  return state;
 }
 
 export async function integrationsRoutes(app: FastifyInstance) {
+  // Both authorize entry points mint the same state row; one redirects, the
+  // other hands the URL back for the client to open itself.
+  async function startAuthorization(
+    req: { auth: { id: string }; query: IntegrationAuthorizeQuery; protocol: string; headers: RequestOriginContext["headers"] },
+    provider: IntegrationProvider,
+  ): Promise<string> {
+    const returnTo = sanitizeReturnTo(req.query.returnTo, req);
+    const state = await createOAuthState(req.auth.id, provider, returnTo);
+    const redirectUri = buildIntegrationCallbackUrl(req, provider);
+    return getProviderClient(provider).buildAuthorizeUrl(state, redirectUri);
+  }
+
   app.get<{ Params: { provider: string }; Querystring: IntegrationAuthorizeQuery }>(
     "/integrations/:provider/authorize",
     { preHandler: verifyAuth },
@@ -144,20 +213,15 @@ export async function integrationsRoutes(app: FastifyInstance) {
         return reply.code(400).send({ error: "Invalid provider" });
       }
 
-      const returnTo = sanitizeReturnTo(req.query.returnTo, req);
-      const state = randomState();
-      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-      const redirectUri = buildIntegrationCallbackUrl(req, rawProvider);
-
-      await query(
-        `INSERT INTO integration_oauth_states (state, user_id, provider, return_to, issued_at, expires_at)
-         VALUES ($1, $2, $3, $4, now(), $5)`,
-        [state, req.auth.id, rawProvider, returnTo, expiresAt],
-      );
-
-      const client = getProviderClient(rawProvider);
-      const authorizeUrl = await client.buildAuthorizeUrl(state, redirectUri);
-      return reply.redirect(authorizeUrl);
+      try {
+        return reply.redirect(await startAuthorization(req, rawProvider));
+      } catch (error) {
+        if (isIntegrationNotConfiguredError(error)) {
+          req.log.error({ provider: rawProvider, missing: error.missing }, "Integration is not configured");
+          return reply.code(503).send({ error: error.reason });
+        }
+        throw error;
+      }
     },
   );
 
@@ -170,20 +234,15 @@ export async function integrationsRoutes(app: FastifyInstance) {
         return reply.code(400).send({ error: "Invalid provider" });
       }
 
-      const returnTo = sanitizeReturnTo(req.query.returnTo, req);
-      const state = randomState();
-      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-      const redirectUri = buildIntegrationCallbackUrl(req, rawProvider);
-
-      await query(
-        `INSERT INTO integration_oauth_states (state, user_id, provider, return_to, issued_at, expires_at)
-         VALUES ($1, $2, $3, $4, now(), $5)`,
-        [state, req.auth.id, rawProvider, returnTo, expiresAt],
-      );
-
-      const client = getProviderClient(rawProvider);
-      const authorizeUrl = await client.buildAuthorizeUrl(state, redirectUri);
-      return { url: authorizeUrl };
+      try {
+        return { url: await startAuthorization(req, rawProvider) };
+      } catch (error) {
+        if (isIntegrationNotConfiguredError(error)) {
+          req.log.error({ provider: rawProvider, missing: error.missing }, "Integration is not configured");
+          return reply.code(503).send({ error: error.reason });
+        }
+        throw error;
+      }
     },
   );
 
@@ -194,32 +253,79 @@ export async function integrationsRoutes(app: FastifyInstance) {
       if (!isIntegrationProvider(rawProvider)) {
         return reply.code(400).send({ error: "Invalid provider" });
       }
+
       const code = req.query.code?.trim();
       const state = req.query.state?.trim();
-      if (!code || !state) {
+      const providerError = req.query.error?.trim();
+
+      // Consume the state row atomically so a replayed callback cannot exchange
+      // the same code twice.
+      const stateResult = state
+        ? await query<OAuthStateRow>(
+            `DELETE FROM integration_oauth_states
+              WHERE state = $1 AND provider = $2
+              RETURNING user_id, provider, return_to, expires_at`,
+            [state, rawProvider],
+          )
+        : null;
+      const stateRow = stateResult?.rows[0] ?? null;
+
+      // Everything below finishes the round trip the same way: back to the page
+      // that started it, or a completion page when there is nowhere to go.
+      const finish = (status: "connected" | "error", message: string) => {
+        const returnTo = stateRow?.return_to ?? "";
+        if (!returnTo) {
+          return reply
+            .code(status === "connected" ? 200 : 400)
+            .type("text/html; charset=utf-8")
+            .send(renderCompletionPage(rawProvider, message, status === "connected"));
+        }
+
+        let target: URL;
+        try {
+          target = new URL(returnTo);
+        } catch {
+          return reply
+            .code(status === "connected" ? 200 : 400)
+            .type("text/html; charset=utf-8")
+            .send(renderCompletionPage(rawProvider, message, status === "connected"));
+        }
+        target.searchParams.set("integration", rawProvider);
+        target.searchParams.set("integration_status", status);
+        if (status === "error") target.searchParams.set("integration_error", message);
+        return reply.code(303).redirect(target.toString());
+      };
+
+      if (providerError) {
+        req.log.info({ provider: rawProvider, providerError }, "Integration authorization declined");
+        return finish(
+          "error",
+          providerError === "access_denied"
+            ? `Authorization was cancelled, so ${rawProvider} is not connected.`
+            : `${rawProvider} returned "${providerError}".`,
+        );
+      }
+
+      if (!state || !code) {
         return reply.code(400).send({ error: "Missing code/state" });
       }
-
-      const stateResult = await query<OAuthStateRow>(
-        `SELECT user_id, provider, return_to, expires_at
-         FROM integration_oauth_states
-         WHERE state = $1 AND provider = $2`,
-        [state, rawProvider],
-      );
-
-      if (stateResult.rowCount === 0) {
+      if (!stateRow) {
         return reply.code(400).send({ error: "Invalid OAuth state" });
       }
-
-      const stateRow = stateResult.rows[0];
       if (stateRow.expires_at.getTime() <= Date.now()) {
-        await query("DELETE FROM integration_oauth_states WHERE state = $1", [state]);
-        return reply.code(400).send({ error: "OAuth state expired" });
+        return finish("error", "The connection request expired. Please try connecting again.");
       }
 
       const client = getProviderClient(rawProvider);
       const redirectUri = buildIntegrationCallbackUrl(req, rawProvider);
-      const tokens = await client.exchangeCode(code, redirectUri);
+
+      let tokens;
+      try {
+        tokens = await client.exchangeCode(code, redirectUri);
+      } catch (error) {
+        req.log.error({ provider: rawProvider, err: error }, "Integration token exchange failed");
+        return finish("error", `Could not complete the ${rawProvider} connection. Please try again.`);
+      }
 
       await query(
         `INSERT INTO user_integrations (
@@ -230,7 +336,7 @@ export async function integrationsRoutes(app: FastifyInstance) {
          ON CONFLICT (user_id, provider) DO UPDATE SET
            provider_account_id = EXCLUDED.provider_account_id,
            access_token_enc = EXCLUDED.access_token_enc,
-           refresh_token_enc = EXCLUDED.refresh_token_enc,
+           refresh_token_enc = COALESCE(EXCLUDED.refresh_token_enc, user_integrations.refresh_token_enc),
            token_expires_at = EXCLUDED.token_expires_at,
            scope = EXCLUDED.scope,
            status = 'connected',
@@ -248,16 +354,7 @@ export async function integrationsRoutes(app: FastifyInstance) {
         ],
       );
 
-      await query("DELETE FROM integration_oauth_states WHERE state = $1", [state]);
-
-      const rawReturnTo = stateRow.return_to;
-      const returnTo =
-        rawReturnTo.startsWith("http://") || rawReturnTo.startsWith("https://")
-          ? new URL(rawReturnTo)
-          : new URL(rawReturnTo, getIntegrationFrontendOrigin(req));
-      returnTo.searchParams.set("integration", rawProvider);
-      returnTo.searchParams.set("integration_status", "connected");
-      return reply.code(303).redirect(returnTo.toString());
+      return finish("connected", `${rawProvider} is connected.`);
     },
   );
 
@@ -277,15 +374,16 @@ export async function integrationsRoutes(app: FastifyInstance) {
         [req.auth.id, rawProvider],
       );
 
+      const configured = getProviderClient(rawProvider).isConfigured();
       if (result.rowCount === 0) {
-        return { provider: rawProvider, status: "disconnected" };
+        return { provider: rawProvider, status: "disconnected", configured };
       }
 
       const row = result.rows[0];
-      const hasRefresh = Boolean(row.refresh_token_enc);
       return {
         provider: rawProvider,
-        status: integrationStatusValue(row.status, row.token_expires_at, hasRefresh),
+        status: resolveIntegrationStatus(row.status, row.token_expires_at, Boolean(row.refresh_token_enc)),
+        configured,
       };
     },
   );
@@ -316,8 +414,8 @@ export async function integrationsRoutes(app: FastifyInstance) {
             const refreshToken = decryptToken(accessRow.refresh_token_enc);
             await client.revokeToken(refreshToken);
           }
-        } catch {
-          // best effort revoke
+        } catch (error) {
+          req.log.warn({ provider: rawProvider, err: error }, "Integration token revocation failed");
         }
 
         await query(

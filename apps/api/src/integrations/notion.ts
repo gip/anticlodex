@@ -1,7 +1,23 @@
+import {
+  createIntegrationNotConfiguredError,
+  createInvalidSourceUrlError,
+  createProviderApiError,
+  isProviderApiError,
+  type ProviderApiError,
+} from "./errors.js";
+
 const NOTION_AUTH_URL = "https://api.notion.com/v1/oauth/authorize";
 const NOTION_TOKEN_URL = "https://api.notion.com/v1/oauth/token";
+const NOTION_REVOKE_URL = "https://api.notion.com/v1/oauth/revoke";
 const NOTION_PAGE_URL = "https://api.notion.com/v1/pages";
 const NOTION_BLOCKS_URL = "https://api.notion.com/v1/blocks";
+const NOTION_VERSION = "2022-06-28";
+
+// Bounds on how much of a page we pull: Notion pages nest arbitrarily deep and
+// each level costs a request, so cap both the block budget and the depth.
+const MAX_BLOCKS = 400;
+const MAX_DEPTH = 3;
+const BLOCK_PAGE_SIZE = 100;
 
 export interface ExternalTokenResult {
   accessToken: string;
@@ -42,26 +58,28 @@ interface NotionPageResponse {
   properties?: Record<string, unknown>;
 }
 
-interface NotionBlockResponse {
-  results?: Array<{
-    type?: string;
-    paragraph?: { rich_text?: Array<{ plain_text?: string }> };
-  }>;
+interface NotionRichText {
+  plain_text?: string;
 }
 
-export interface NotionApiError extends Error {
-  provider: "notion";
-  status: number;
-  code: "NOTION_API_ERROR";
-  reason: string;
-  statusText: string;
-  responseBody?: string;
-  requestUrl?: string;
+interface NotionBlock {
+  id?: string;
+  type?: string;
+  has_children?: boolean;
+  [key: string]: unknown;
 }
+
+interface NotionBlockListResponse {
+  results?: NotionBlock[];
+  has_more?: boolean;
+  next_cursor?: string | null;
+}
+
+export type NotionApiError = ProviderApiError;
 
 function env(name: string): string {
   const value = process.env[name];
-  if (!value) throw new Error(`${name} is required`);
+  if (!value) throw createIntegrationNotConfiguredError("notion", name);
   return value;
 }
 
@@ -72,39 +90,17 @@ function requireNotionConfig() {
   };
 }
 
-function notionNotionAuthHeaders(): HeadersInit {
+export function isNotionConfigured(): boolean {
+  return Boolean(process.env.NOTION_CLIENT_ID && process.env.NOTION_CLIENT_SECRET);
+}
+
+function notionClientAuthHeaders(): Record<string, string> {
   const { clientId, clientSecret } = requireNotionConfig();
   const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
   return {
     Authorization: `Basic ${auth}`,
-    "Notion-Version": "2022-06-28",
+    "Notion-Version": NOTION_VERSION,
   };
-}
-
-function extractNotionPageId(rawUrl: string): string | null {
-  try {
-    const candidateSource = rawUrl.trim();
-    const url = new URL(candidateSource);
-    const host = url.hostname.toLowerCase();
-    if (!host.includes("notion.so") && !host.includes("notion.site") && !host.includes("notion.com")) return null;
-
-    const candidates = [
-      ...url.pathname.split("/").filter(Boolean),
-      ...Array.from(url.searchParams.values()),
-      candidateSource,
-    ];
-
-    for (const candidate of candidates) {
-      const normalizedCandidate = extractNotionIdFromText(candidate);
-      if (normalizedCandidate) {
-        return normalizedCandidate;
-      }
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
 }
 
 function extractNotionIdFromText(value: string): string | null {
@@ -119,8 +115,34 @@ function extractNotionIdFromText(value: string): string | null {
   return plainMatch ? plainMatch[0].toLowerCase() : null;
 }
 
-function normalizeNotionId(rawId: string): string {
-  return rawId.toLowerCase();
+function extractNotionPageId(rawUrl: string): string | null {
+  try {
+    const candidateSource = rawUrl.trim();
+    const url = new URL(candidateSource);
+    const host = url.hostname.toLowerCase();
+    if (!host.endsWith("notion.so") && !host.endsWith("notion.site") && !host.endsWith("notion.com")) return null;
+
+    const candidates = [
+      // The page id is the trailing token of the path; `p` takes precedence over
+      // `v` (a database view id) when both are present in the query string.
+      ...url.pathname.split("/").filter(Boolean).reverse(),
+      url.searchParams.get("p") ?? "",
+      ...Array.from(url.searchParams.values()),
+      candidateSource,
+    ];
+
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      const normalizedCandidate = extractNotionIdFromText(candidate);
+      if (normalizedCandidate) {
+        return normalizedCandidate;
+      }
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 function buildSourceUrl(sourceId: string): string {
@@ -131,7 +153,7 @@ function extractTitleFromProperties(properties: Record<string, unknown>): string
   const values = Object.values(properties);
   for (const value of values) {
     if (!value || typeof value !== "object") continue;
-    const item = value as { type?: string; title?: Array<{ plain_text?: string }> ; rich_text?: Array<{ plain_text?: string }> };
+    const item = value as { type?: string; title?: NotionRichText[]; rich_text?: NotionRichText[] };
     if (item.type === "title" && Array.isArray(item.title)) {
       const title = item.title.map((entry) => entry?.plain_text ?? "").join("");
       if (title.trim()) return title.trim();
@@ -144,50 +166,109 @@ function extractTitleFromProperties(properties: Record<string, unknown>): string
   return null;
 }
 
-function buildTextFromBlocks(blocks: NotionBlockResponse["results"]): string {
-  const lines: string[] = [];
-  for (const block of blocks ?? []) {
-    if (block.type === "paragraph" && Array.isArray(block.paragraph?.rich_text)) {
-      const line = block.paragraph?.rich_text.map((entry) => entry?.plain_text ?? "").join("") ?? "";
-      if (line.trim()) lines.push(line.trim());
-    }
-  }
-  return lines.join("\n");
+function richTextToPlain(value: unknown): string {
+  if (!Array.isArray(value)) return "";
+  return (value as NotionRichText[]).map((entry) => entry?.plain_text ?? "").join("");
 }
 
-async function notionApiRequest(url: string, accessToken: string, options: RequestInit = {}) {
+// Renders one block as a markdown-ish line. Returns null for blocks that carry
+// no text of their own (a column layout, an unsupported embed) so the caller can
+// still descend into their children.
+function renderBlock(block: NotionBlock, depth: number): string | null {
+  const type = block.type;
+  if (!type) return null;
+  const payload = block[type];
+  const data = (payload && typeof payload === "object" ? payload : {}) as Record<string, unknown>;
+  const text = richTextToPlain(data.rich_text);
+  const indent = "  ".repeat(Math.max(0, depth));
+
+  switch (type) {
+    case "paragraph":
+      return text.trim() ? text.trim() : null;
+    case "heading_1":
+      return text.trim() ? `# ${text.trim()}` : null;
+    case "heading_2":
+      return text.trim() ? `## ${text.trim()}` : null;
+    case "heading_3":
+      return text.trim() ? `### ${text.trim()}` : null;
+    case "bulleted_list_item":
+    case "toggle":
+      return text.trim() ? `${indent}- ${text.trim()}` : null;
+    case "numbered_list_item":
+      return text.trim() ? `${indent}1. ${text.trim()}` : null;
+    case "to_do":
+      return text.trim() ? `${indent}- [${data.checked === true ? "x" : " "}] ${text.trim()}` : null;
+    case "quote":
+      return text.trim() ? `> ${text.trim()}` : null;
+    case "callout":
+      return text.trim() ? `> ${text.trim()}` : null;
+    case "code": {
+      if (!text.trim()) return null;
+      const language = typeof data.language === "string" ? data.language : "";
+      return `\`\`\`${language}\n${text}\n\`\`\``;
+    }
+    case "divider":
+      return "---";
+    case "child_page":
+      return typeof data.title === "string" && data.title.trim() ? `## ${data.title.trim()}` : null;
+    case "table_row": {
+      const cells = Array.isArray(data.cells) ? data.cells : [];
+      const rendered = cells.map((cell) => richTextToPlain(cell).trim());
+      return rendered.some((cell) => cell) ? `| ${rendered.join(" | ")} |` : null;
+    }
+    case "bookmark":
+    case "embed":
+    case "link_preview":
+      return typeof data.url === "string" && data.url.trim() ? data.url.trim() : null;
+    case "image":
+    case "video":
+    case "file":
+    case "pdf": {
+      const caption = richTextToPlain(data.caption).trim();
+      return caption ? `(${type}: ${caption})` : null;
+    }
+    default:
+      return text.trim() ? text.trim() : null;
+  }
+}
+
+async function notionApiRequest<T>(url: string, accessToken: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(url, {
     ...options,
     headers: {
       Authorization: `Bearer ${accessToken}`,
-      "Notion-Version": "2022-06-28",
+      "Notion-Version": NOTION_VERSION,
       ...(options.headers ?? {}),
     },
   });
 
   if (!response.ok) {
     const responseBody = await parseNotionApiErrorBody(response);
-    const requestUrl = url;
-    const reason = await buildNotionApiErrorReason(response.status, requestUrl, responseBody);
-    const error = new Error(`Notion API request failed: ${response.status} ${reason}`) as NotionApiError;
-    error.provider = "notion";
-    error.status = response.status;
-    error.code = "NOTION_API_ERROR";
-    error.reason = reason;
-    error.statusText = response.statusText;
-    error.responseBody = responseBody;
-    error.requestUrl = requestUrl;
-    throw error;
+    throw createProviderApiError("notion", {
+      status: response.status,
+      statusText: response.statusText,
+      reason: buildNotionApiErrorReason(response.status, responseBody),
+      responseBody,
+      requestUrl: url,
+    });
   }
 
-  return response.json();
+  return (await response.json()) as T;
 }
 
 async function parseNotionApiErrorBody(response: Response): Promise<string> {
   try {
     const text = await response.text();
-    const trimmed = text.trim();
-    if (!trimmed) return "";
+    return parseNotionErrorText(text);
+  } catch {
+    return "";
+  }
+}
+
+function parseNotionErrorText(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+  try {
     const parsed = JSON.parse(trimmed) as Record<string, unknown>;
     const message = parsed.message;
     const reason = Array.isArray(message)
@@ -199,15 +280,11 @@ async function parseNotionApiErrorBody(response: Response): Promise<string> {
           : "";
     return reason || trimmed.slice(0, 500);
   } catch {
-    return "";
+    return trimmed.slice(0, 500);
   }
 }
 
-async function buildNotionApiErrorReason(
-  status: number,
-  _requestUrl?: string,
-  responseBody?: string,
-): Promise<string> {
+function buildNotionApiErrorReason(status: number, responseBody?: string): string {
   if (status === 401) {
     return "Notion token is unauthorized. Reconnect your Notion integration.";
   }
@@ -231,25 +308,40 @@ async function requestNotionToken(payload: Record<string, string>): Promise<Noti
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...notionNotionAuthHeaders(),
+      ...notionClientAuthHeaders(),
     },
     body: JSON.stringify(payload),
   });
-  const result = await response.json().catch(() => ({}));
+
+  // Read the body once -- the error path and the success path cannot both
+  // consume the stream.
+  const rawBody = await response.text().catch(() => "");
   if (!response.ok) {
-    const responseBody = await parseNotionApiErrorBody(response);
-    const reason = await buildNotionApiErrorReason(response.status, NOTION_TOKEN_URL, responseBody);
-    throw new Error(`Notion token request failed: ${response.status} ${reason}`);
+    const responseBody = parseNotionErrorText(rawBody);
+    throw createProviderApiError("notion", {
+      status: response.status,
+      statusText: response.statusText,
+      reason: responseBody
+        ? `Notion rejected the token request: ${responseBody}`
+        : "Notion rejected the token request.",
+      responseBody,
+      requestUrl: NOTION_TOKEN_URL,
+    });
   }
-  return result as NotionTokenResponse;
+
+  try {
+    return JSON.parse(rawBody) as NotionTokenResponse;
+  } catch {
+    return {};
+  }
 }
 
 async function requestNotionTokenRevocation(accessToken: string) {
-  const response = await fetch("https://api.notion.com/v1/oauth/revoke", {
+  const response = await fetch(NOTION_REVOKE_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...notionNotionAuthHeaders(),
+      ...notionClientAuthHeaders(),
     },
     body: JSON.stringify({ token: accessToken }),
   });
@@ -260,15 +352,17 @@ async function requestNotionTokenRevocation(accessToken: string) {
 
 export async function buildAuthorizeUrl(state: string, redirectUri: string): Promise<string> {
   const { clientId } = requireNotionConfig();
-  const scope = process.env.NOTION_OAUTH_SCOPE ?? "read_content";
   const params = new URLSearchParams({
     client_id: clientId,
     redirect_uri: redirectUri,
     response_type: "code",
     owner: "user",
     state,
-    scope,
   });
+  // Notion derives capabilities from the integration's settings; only send a
+  // scope when one is explicitly configured.
+  const scope = process.env.NOTION_OAUTH_SCOPE?.trim();
+  if (scope) params.set("scope", scope);
   return `${NOTION_AUTH_URL}?${params.toString()}`;
 }
 
@@ -313,22 +407,57 @@ export async function refreshAccessToken(refreshToken: string): Promise<External
   };
 }
 
+// Walks a block subtree breadth-first within MAX_BLOCKS/MAX_DEPTH, following
+// Notion's cursor pagination so long pages import in full rather than being
+// silently cut off at the first page of children.
+async function collectBlockLines(
+  blockId: string,
+  accessToken: string,
+  lines: string[],
+  depth: number,
+  budget: { remaining: number },
+): Promise<void> {
+  if (depth > MAX_DEPTH || budget.remaining <= 0) return;
+
+  let cursor: string | null = null;
+  do {
+    const params = new URLSearchParams({ page_size: String(BLOCK_PAGE_SIZE) });
+    if (cursor) params.set("start_cursor", cursor);
+    const result: NotionBlockListResponse = await notionApiRequest<NotionBlockListResponse>(
+      `${NOTION_BLOCKS_URL}/${encodeURIComponent(blockId)}/children?${params.toString()}`,
+      accessToken,
+    );
+
+    for (const block of result.results ?? []) {
+      if (budget.remaining <= 0) return;
+      budget.remaining -= 1;
+
+      const line = renderBlock(block, depth);
+      if (line) lines.push(line);
+
+      if (block.has_children && block.id && block.type !== "child_page" && block.type !== "child_database") {
+        await collectBlockLines(block.id, accessToken, lines, depth + 1, budget);
+      }
+    }
+
+    cursor = result.has_more ? (result.next_cursor ?? null) : null;
+  } while (cursor && budget.remaining > 0);
+}
+
 export async function fetchDocumentByUrl(sourceUrl: string, accessToken: string): Promise<ExternalDocumentResult> {
   const sourceLookup = parseSourceUrl(sourceUrl);
-  const page = await notionApiRequest(
+  const page = await notionApiRequest<NotionPageResponse>(
     `${NOTION_PAGE_URL}/${encodeURIComponent(sourceLookup.sourceExternalId)}`,
     accessToken,
-  ) as NotionPageResponse;
+  );
 
   const properties = (page.properties ?? {}) as Record<string, unknown>;
   const title = extractTitleFromProperties(properties) ?? "Notion Page";
 
-  const blockResult = await notionApiRequest(
-    `${NOTION_BLOCKS_URL}/${encodeURIComponent(sourceLookup.sourceExternalId)}/children?page_size=80`,
-    accessToken,
-  ) as NotionBlockResponse;
-  const snippet = buildTextFromBlocks(blockResult.results);
-  const text = snippet ? `# ${title}\n\n${snippet}` : `Notion page: ${title}`;
+  const lines: string[] = [];
+  await collectBlockLines(sourceLookup.sourceExternalId, accessToken, lines, 0, { remaining: MAX_BLOCKS });
+  const body = lines.join("\n").trim();
+  const text = body ? `# ${title}\n\n${body}` : `Notion page: ${title}`;
 
   return {
     sourceExternalId: sourceLookup.sourceExternalId,
@@ -338,7 +467,7 @@ export async function fetchDocumentByUrl(sourceUrl: string, accessToken: string)
     sourceMetadata: {
       provider: "notion",
       id: sourceLookup.sourceExternalId,
-      url: page.url ?? sourceUrl,
+      url: page.url ?? sourceLookup.sourceUrl,
       title,
     },
   };
@@ -346,11 +475,15 @@ export async function fetchDocumentByUrl(sourceUrl: string, accessToken: string)
 
 export function parseSourceUrl(sourceUrl: string): SourceLookupResult {
   const id = extractNotionPageId(sourceUrl);
-  if (!id) throw new Error("Invalid Notion URL");
-  const normalized = normalizeNotionId(id);
+  if (!id) {
+    throw createInvalidSourceUrlError(
+      "notion",
+      "That is not a Notion page URL. Use Share -> Copy link on the page you want to import.",
+    );
+  }
   return {
-    sourceExternalId: normalized,
-    sourceUrl: buildSourceUrl(normalized),
+    sourceExternalId: id,
+    sourceUrl: buildSourceUrl(id),
   };
 }
 
@@ -359,7 +492,5 @@ export async function revokeAccessToken(token: string): Promise<void> {
 }
 
 export function isNotionApiError(value: unknown): value is NotionApiError {
-  return typeof value === "object"
-    && value !== null
-    && (value as { code?: string }).code === "NOTION_API_ERROR";
+  return isProviderApiError(value) && value.provider === "notion";
 }

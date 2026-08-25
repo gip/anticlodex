@@ -17,6 +17,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
       result: { token?: string; error?: string },
     ) => ipcRenderer.send("auth:access-token-response", requestId, result),
   },
+  integrations: {
+    openExternal: (url: string) =>
+      ipcRenderer.invoke("integrations:open-external", url) as Promise<{ ok?: boolean; error?: string }>,
+  },
   assistant: {
     run: (payload: {
       handle: string;
